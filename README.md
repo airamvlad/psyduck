@@ -17,13 +17,34 @@ U Audio i MIDI režimu **Rate** određuje koliko traje jedan prolaz kroz krivu. 
 
 Ispod krive se vide **kick** (sidechain, narandžasto) i **bas** (izlaz, plavo) raspoređeni po ciklusu, pa se vidi gde se preklapaju.
 
-Ostalo:
+**Target** (pored Mode) bira šta kriva pomera:
 
-- **Multiband**: utišava se samo deo basa ispod frekvencije **Crossover**, a sve iznad prolazi netaknuto.
-- **Kick / Bass phase**: pokazuje da li se niske frekvencije kicka i basa sabiraju ("in phase") ili poništavaju ("cancelling"). Ako se poništavaju, probaj **Invert**. Meri se bas pre utišavanja, dok kick i bas sviraju zajedno.
+- **Volume**: jačinu (klasičan ducking).
+- **Filter**: low-pass filter. Dno krive je frekvencija **Filter low point**, vrh je potpuno otvoren filter, a **Resonance** naglašava prelomnu frekvenciju.
+- **Pan**: položaj u stereo slici. Sredina krive je centar, dno levo, vrh desno, a Amount određuje širinu.
+
+**Multiband** (samo uz Volume) deli zvuk na tri pojasa: Low, Mid i High.
+
+- **Low | Mid** i **Mid | High** su frekvencije na kojima se pojasevi dele.
+- Dugmad **Low**, **Mid**, **High** određuju koliko se koji pojas utišava (Amount i dalje važi za sve zajedno).
+- Svaki pojas ima svoju krivu. Jezičci Low / Mid / High iznad krive biraju koju uređuješ, a ostale dve se vide bledo. Low pojas koristi glavnu krivu.
+
+Faza kicka i basa:
+
+- **Kick / Bass phase** pokazuje da li se niske frekvencije kicka i basa sabiraju ("in phase") ili poništavaju ("cancelling"). Meri se bas pre utišavanja, dok kick i bas sviraju zajedno.
+- **Invert** okreće polaritet basa, a **Bass delay** ga pomera unazad za do 10 ms.
+- **Align** sam izmeri poslednje dve sekunde zvuka i podesi Bass delay i Invert tako da low-end bude najpuniji.
+
+Alati iznad krive:
+
+- **Undo / Redo**, **Snap** (lepljenje na mrežu, Shift ga privremeno obrće) i **Grid** (4 do 64 koraka).
 - **Suggest**: iz kicka koji se vidi ispod krive sam napravi početnu krivu.
+- **Copy / Paste**: kopira krivu u drugi pojas ili u drugu instancu plugina.
+- **Wave**: kick i bas kao talasni oblik umesto jačine. **Freeze** zamrzava sliku. Točkić miša zumira, Shift + točkić pomera, a **Fit** vraća ceo ciklus.
+- **A / B**: dva kompletna podešavanja za poređenje. Dugme "A > B" kopira trenutno u drugo.
 - **Presets**: fabrički preseti, tvoji preseti i "Save current curve...". Tvoji preseti su fajlovi `.psycurve` u folderu koji otvara "Open preset folder".
-- **Undo / Redo** za izmene krive i **Snap** za lepljenje tačaka na mrežu (Shift privremeno obrće Snap).
+
+Rate ima i **2 bars** i **4 bars** za duže obrasce (računa se takt 4/4). Veličina prozora se pamti sa projektom.
 
 U Bitwigu: sidechain izvor se bira u panelu uređaja (VST3 sidechain ulaz), a za MIDI režim note dovedi na kanal sa pluginom, na primer preko Note Receiver uređaja.
 

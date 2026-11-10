@@ -24,7 +24,7 @@ struct CurvePoint
 class Curve
 {
 public:
-    static constexpr std::size_t maxPoints = 32;
+    static constexpr std::size_t maxPoints = 64;
 
     Curve() { setToDefaultDuck(); }
 

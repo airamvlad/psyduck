@@ -7,7 +7,7 @@ namespace psyduck
 {
 
 /** Tempo-synced cycle lengths, in quarter notes. Order must match the Rate parameter. */
-inline constexpr std::array<double, 9> rateBeats {
+inline constexpr std::array<double, 11> rateBeats {
     4.0,        // 1/1
     2.0,        // 1/2
     1.0,        // 1/4
@@ -16,11 +16,13 @@ inline constexpr std::array<double, 9> rateBeats {
     2.0 / 3.0,  // 1/4T
     1.0 / 3.0,  // 1/8T
     1.0 / 6.0,  // 1/16T
-    0.75        // 1/8D
+    0.75,       // 1/8D
+    8.0,        // 2 bars (in 4/4)
+    16.0        // 4 bars (in 4/4)
 };
 
-inline constexpr std::array<const char*, 9> rateNames {
-    "1/1", "1/2", "1/4", "1/8", "1/16", "1/4T", "1/8T", "1/16T", "1/8D"
+inline constexpr std::array<const char*, 11> rateNames {
+    "1/1", "1/2", "1/4", "1/8", "1/16", "1/4T", "1/8T", "1/16T", "1/8D", "2 bars", "4 bars"
 };
 
 inline constexpr int defaultRateIndex = 2; // 1/4

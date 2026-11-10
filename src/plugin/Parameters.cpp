@@ -76,6 +76,39 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         juce::NormalisableRange<float> (20.0f, 500.0f, 1.0f, 0.5f), 120.0f,
         juce::AudioParameterFloatAttributes().withLabel ("ms")));
 
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { crossoverHigh, 1 }, "Crossover High",
+        juce::NormalisableRange<float> (500.0f, 10000.0f, 1.0f, 0.4f), 2500.0f,
+        juce::AudioParameterFloatAttributes().withLabel ("Hz")));
+
+    // Defaults keep older projects sounding the same: only the low band ducks.
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { amountLow, 1 }, "Low Amount",
+        juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 100.0f, percent));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { amountMid, 1 }, "Mid Amount",
+        juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 0.0f, percent));
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { amountHigh, 1 }, "High Amount",
+        juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 0.0f, percent));
+
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { target, 1 }, "Target", juce::StringArray { "Volume", "Filter", "Pan" }, 0));
+
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { filterMin, 1 }, "Filter Low Point",
+        juce::NormalisableRange<float> (20.0f, 2000.0f, 1.0f, 0.4f), 80.0f,
+        juce::AudioParameterFloatAttributes().withLabel ("Hz")));
+
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { resonance, 1 }, "Resonance",
+        juce::NormalisableRange<float> (0.0f, 100.0f, 0.1f), 20.0f, percent));
+
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { bassDelay, 1 }, "Bass Delay",
+        juce::NormalisableRange<float> (0.0f, maxBassDelayMs, 0.01f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel ("ms")));
+
     return layout;
 }
 

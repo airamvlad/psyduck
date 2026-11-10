@@ -75,6 +75,9 @@ public:
 
     bool isActive() const noexcept { return active; }
 
+    /** True while waiting for the next trigger (no glide, no curve playing). */
+    bool isIdle() const noexcept { return ! active && countdown < 0; }
+
     /** Position in the curve (0..1), or -1 when no shot is playing. */
     float getPhase() const noexcept { return active ? (float) phase : -1.0f; }
 

@@ -2,14 +2,17 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
-#include "dsp/Curve.h"
+#include "Parameters.h"
 #include "dsp/Crossover.h"
+#include "dsp/Curve.h"
 #include "dsp/DelayLine.h"
 #include "dsp/EnvelopeFollower.h"
 #include "dsp/GainProcessor.h"
 #include "dsp/OneShot.h"
+#include "dsp/PhaseAlign.h"
 #include "dsp/PhaseMeter.h"
 #include "dsp/Scope.h"
+#include "dsp/ShaperFilter.h"
 #include "dsp/SyncEngine.h"
 #include "dsp/TriggerDetector.h"
 
@@ -21,6 +24,8 @@ class PsyDuckAudioProcessor final : public juce::AudioProcessor,
                                     private juce::Timer
 {
 public:
+    static constexpr int numBands = psyduck::params::numBands;
+
     PsyDuckAudioProcessor();
     ~PsyDuckAudioProcessor() override = default;
 
@@ -50,20 +55,22 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
-    /** Copy of the current curve. Safe to call from any thread except the audio thread. */
-    psyduck::Curve getCurve() const;
+    //==========================================================================
+    // Curves. Band 0 is the main curve (and the low band when Multiband is on),
+    // band 1 the mid band, band 2 the high band.
+    // All of these are safe from any thread except the audio thread.
 
-    /** Replaces the curve. Safe to call from any thread except the audio thread. */
-    void setCurve (const psyduck::Curve&);
+    psyduck::Curve getCurve (int band = 0) const;
+    void setCurve (const psyduck::Curve&, int band = 0);
 
     /** Tells the host the project changed. Call when the user finishes an edit. */
     void curveEditFinished();
 
-    /** Goes up every time the curve changes, so the UI knows when to refresh. */
+    /** Goes up every time a curve changes, so the UI knows when to refresh. */
     int getCurveVersion() const noexcept { return curveVersion.load (std::memory_order_relaxed); }
 
-    /** Call before changing the curve so the change can be undone. Message thread only. */
-    void beginCurveEdit();
+    /** Call before changing a curve so the change can be undone. Message thread only. */
+    void beginCurveEdit (int band = 0);
     bool canUndo() const noexcept { return ! undoStack.empty(); }
     bool canRedo() const noexcept { return ! redoStack.empty(); }
     void undoCurve();
@@ -72,50 +79,104 @@ public:
     static juce::String curveToString (const psyduck::Curve&);
     static bool curveFromString (const juce::String&, psyduck::Curve&);
 
-    /** Whether points snap to the grid while dragging. Saved with the project. */
+    //==========================================================================
+    // Editor settings that are saved with the project.
+
     std::atomic<bool> snapToGrid { true };
+    std::atomic<int> gridColumns { 16 };
+    std::atomic<int> editBand { 0 };          // which curve the editor shows
+    std::atomic<int> editorWidth { 1000 };
+    std::atomic<int> editorHeight { 680 };
+
+    //==========================================================================
+    // A/B comparison. Message thread only.
+
+    int getActiveSlot() const noexcept { return activeSlot; }
+    void switchSlot();
+    void copyToOtherSlot();
+
+    //==========================================================================
+    // Meters.
 
     /** How the low end of kick and bass line up: +1 adds up, -1 cancels.
         Only meaningful while hasPhaseReading() is true. */
     float getPhaseCorrelation() const noexcept { return phaseCorrelation.load (std::memory_order_relaxed); }
     bool hasPhaseReading() const noexcept { return phaseValid.load (std::memory_order_relaxed); }
 
-    /** Kick and bass levels along the cycle, for drawing under the curve. */
+    /** Works out the bass delay and polarity that give the fullest low end,
+        from the last two seconds of audio. Message thread only.
+        The result's lag is in milliseconds here (see alignmentLagMs). */
+    psyduck::Alignment findAlignment (float& lagMs);
+
+    /** Kick and bass along the cycle, for drawing under the curve. */
     const psyduck::Scope& getScope() const noexcept { return scope; }
+    std::atomic<bool> scopeFrozen { false };
 
     /** Position in the cycle (0..1) at the end of the last block, for the UI playhead.
         Negative while a trigger mode is waiting for the next hit. */
     float getDisplayPhase() const noexcept { return displayPhase.load (std::memory_order_relaxed); }
 
 private:
-    psyduck::Curve audioCurve;          // audio thread only
-    psyduck::Curve sharedCurve;         // guarded by curveLock
-    mutable juce::SpinLock curveLock;
-    std::atomic<bool> curveDirty { false };
-    std::atomic<int> curveVersion { 0 };
-
     void timerCallback() override;
     int lookaheadSamplesFor (double sampleRate) const noexcept;
 
+    juce::ValueTree createState() const;
+    void applyState (const juce::ValueTree&);
+
+    struct UndoStep
+    {
+        int band = 0;
+        psyduck::Curve curve;
+    };
+
+    // Curves
+    std::array<psyduck::Curve, numBands> audioCurves;      // audio thread only
+    std::array<psyduck::Curve, numBands> sharedCurves;     // guarded by curveLock
+    mutable juce::SpinLock curveLock;
+    std::atomic<bool> curveDirty { false };
+    std::atomic<int> curveVersion { 0 };
+    std::vector<UndoStep> undoStack, redoStack;            // message thread only
+
+    // A/B
+    std::array<juce::ValueTree, 2> slots;
+    int activeSlot = 0;
+
+    // DSP
     psyduck::SyncEngine sync;
-    psyduck::GainProcessor gain;
-    psyduck::OneShot oneShot;
     psyduck::TriggerDetector detector;
-    psyduck::Scope scope;
-    std::array<psyduck::DelayLine, 2> mainDelay;
-    psyduck::DelayLine sidechainDelay;
     psyduck::EnvelopeFollower follower;
+    std::array<psyduck::OneShot, numBands> oneShots;
+    std::array<psyduck::GainProcessor, numBands> gains;
+    std::array<psyduck::DelayLine, 2> mainDelay;
+    std::array<psyduck::ThreeBandSplit, 2> bandSplit;
+    std::array<psyduck::ShaperFilter, 2> shaperFilter;
+    psyduck::DelayLine sidechainDelay;
+    psyduck::DelayLine phaseBassDelay;
     psyduck::PhaseMeter phaseMeter;
-    std::array<psyduck::BandSplit, 2> bandSplit;
-    float lastCrossover = 0.0f;
-    bool lastMultiband = false;
+    psyduck::Scope scope;
+
+    float panSmoothed = 0.0f;
+    float panCoeff = 1.0f;
+    float lastCrossoverLow = 0.0f, lastCrossoverHigh = 0.0f;
+    bool lastSplit = false;
+    bool lastFilter = false;
     int lastMode = 0;
+    int filterCounter = 0;
+
+    // Recording for phase alignment: low-passed, downsampled kick and bass.
+    psyduck::Biquad alignKickFilter[2], alignBassFilter[2];
+    std::vector<float> alignKick, alignBass;               // guarded by alignLock
+    juce::SpinLock alignLock;
+    int alignWrite = 0;
+    int alignDecimation = 8;
+    int alignCounter = 0;
+    double alignSampleRate = 6000.0;
 
     std::atomic<float> phaseCorrelation { 0.0f };
     std::atomic<bool> phaseValid { false };
+    std::atomic<float> displayPhase { 0.0f };
 
-    std::vector<psyduck::Curve> undoStack, redoStack;   // message thread only
-
+    // Parameters
     std::atomic<float>* rateParam = nullptr;
     std::atomic<float>* amountParam = nullptr;
     std::atomic<float>* mixParam = nullptr;
@@ -127,10 +188,14 @@ private:
     std::atomic<float>* midiNoteParam = nullptr;
     std::atomic<float>* multibandParam = nullptr;
     std::atomic<float>* crossoverParam = nullptr;
+    std::atomic<float>* crossoverHighParam = nullptr;
+    std::array<std::atomic<float>*, numBands> bandAmountParams {};
     std::atomic<float>* invertParam = nullptr;
     std::atomic<float>* releaseParam = nullptr;
-
-    std::atomic<float> displayPhase { 0.0f };
+    std::atomic<float>* targetParam = nullptr;
+    std::atomic<float>* filterMinParam = nullptr;
+    std::atomic<float>* resonanceParam = nullptr;
+    std::atomic<float>* bassDelayParam = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PsyDuckAudioProcessor)
 };

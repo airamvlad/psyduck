@@ -196,6 +196,142 @@ void followerMode()
     check (minOf (out, 80000, 96000) > 0.99f, "follower recovers after the kick");
 }
 
+void threeBands()
+{
+    // Low fully ducked, highs at half: a 5 kHz tone must dip to about half.
+    auto p = make();
+    setValue (*p, psyduck::params::multiband, 1.0f);
+    setValue (*p, psyduck::params::amountHigh, 50.0f);
+
+    const auto high = run (*p, 48000, -1, -1, 36, true);
+    float lowestPeak = 10.0f, highestPeak = 0.0f;
+    for (int start = 4800; start + 480 <= 48000; start += 480)
+    {
+        const float peak = maxOf (high, start, start + 480);
+        lowestPeak = std::min (lowestPeak, peak);
+        highestPeak = std::max (highestPeak, peak);
+    }
+    check (lowestPeak > 0.42f && lowestPeak < 0.58f, "high band ducks by its own amount");
+    check (highestPeak > 0.95f, "high band returns to full level");
+
+    // Each band follows its own curve: a flat high curve means no ducking there.
+    p->setCurve (psyduck::makePreset (5), 2);
+    setValue (*p, psyduck::params::amountHigh, 100.0f);
+    const auto flat = run (*p, 48000, -1, -1, 36, true);
+    bool untouched = true;
+    for (int start = 9600; start + 480 <= 48000; start += 480)
+        untouched = untouched && maxOf (flat, start, start + 480) > 0.95f;
+    check (untouched, "each band uses its own curve");
+}
+
+void filterAndPan()
+{
+    auto f = make();
+    setChoice (*f, psyduck::params::target, psyduck::params::targetFilter);
+    const auto filtered = run (*f, 48000, -1, -1, 36, true);
+    float lowestPeak = 10.0f, highestPeak = 0.0f;
+    for (int start = 4800; start + 480 <= 48000; start += 480)
+    {
+        const float peak = maxOf (filtered, start, start + 480);
+        lowestPeak = std::min (lowestPeak, peak);
+        highestPeak = std::max (highestPeak, peak);
+    }
+    check (lowestPeak < 0.02f, "filter target closes on the highs at the curve bottom");
+    check (highestPeak > 0.8f, "filter target opens at the curve top");
+
+    auto q = make();
+    setChoice (*q, psyduck::params::target, psyduck::params::targetPan);
+    const auto left = run (*q, 48000, -1, -1);
+    check (minOf (left, 4800, 48000) < 0.05f, "pan target moves the sound away from the left");
+    check (maxOf (left, 4800, 48000) > 0.99f, "pan target keeps full level on the near side");
+    check (minOf (left, 4800, 48000) >= 0.0f, "pan target never inverts a channel");
+}
+
+void longPattern()
+{
+    auto p = make();
+    setChoice (*p, psyduck::params::rate, 10);   // 4 bars = 8 s at 120 BPM
+    const auto out = run (*p, 96000, -1, -1);
+    check (minOf (out, 1000, 20000) < 0.01f, "a 4 bar cycle still starts ducked");
+    check (maxOf (out, 60000, 96000) < 0.9f, "a 4 bar cycle moves slowly");
+}
+
+void alignment()
+{
+    auto p = make();
+    juce::AudioBuffer<float> buffer (4, blockSize);
+    juce::MidiBuffer midi;
+    const int shift = 96;   // the bass is 2 ms early
+
+    const auto burst = [] (int n)
+    {
+        if (n < 0)
+            return 0.0f;
+        const double local = std::fmod ((double) n / sampleRate, 0.25);
+        return (float) (std::exp (-local * 14.0) * std::sin (2.0 * 3.14159265358979 * 55.0 * local));
+    };
+
+    for (int start = 0; start < 144000; start += blockSize)
+    {
+        for (int i = 0; i < blockSize; ++i)
+        {
+            const float bass = -burst (start + i + shift);   // early and inverted
+            const float kick = burst (start + i);
+            buffer.setSample (0, i, bass);
+            buffer.setSample (1, i, bass);
+            buffer.setSample (2, i, kick);
+            buffer.setSample (3, i, kick);
+        }
+        p->processBlock (buffer, midi);
+    }
+
+    float lagMs = 0.0f;
+    const auto result = p->findAlignment (lagMs);
+    check (result.valid, "alignment finds kick and bass");
+    check (std::abs (lagMs - 2.0f) < 0.2f, "alignment measures how early the bass is");
+    check (result.invert, "alignment notices the inverted bass");
+    check (result.after > 0.95f, "alignment predicts a full low end");
+}
+
+void slots()
+{
+    auto p = make();
+    setValue (*p, psyduck::params::amount, 30.0f);
+    p->setCurve (psyduck::makePreset (5));
+
+    p->switchSlot();   // B starts as a copy of A
+    check (p->getActiveSlot() == 1, "switching goes to slot B");
+    setValue (*p, psyduck::params::amount, 80.0f);
+    p->setCurve (psyduck::makePreset (1));
+
+    p->switchSlot();
+    check (std::abs (p->apvts.getRawParameterValue (psyduck::params::amount)->load() - 30.0f) < 0.2f, "slot A keeps its knobs");
+    check (p->getCurve().size() == 2, "slot A keeps its curve");
+
+    p->switchSlot();
+    check (std::abs (p->apvts.getRawParameterValue (psyduck::params::amount)->load() - 80.0f) < 0.2f, "slot B keeps its knobs");
+    check (p->getCurve().size() == 5, "slot B keeps its curve");
+
+    // Both slots survive saving and loading the project.
+    juce::MemoryBlock data;
+    p->getStateInformation (data);
+    auto q = make();
+    q->setStateInformation (data.getData(), (int) data.getSize());
+    check (q->getActiveSlot() == 1 && q->getCurve().size() == 5, "the active slot is restored");
+    q->switchSlot();
+    check (q->getCurve().size() == 2, "the other slot is restored too");
+
+    // Saving many times must not make the saved data grow.
+    juce::MemoryBlock again;
+    q->switchSlot();
+    q->getStateInformation (again);
+    auto r = make();
+    r->setStateInformation (again.getData(), (int) again.getSize());
+    juce::MemoryBlock third;
+    r->getStateInformation (third);
+    check (third.getSize() < again.getSize() + 64, "saved state does not grow with each save");
+}
+
 void state()
 {
     auto a = make();
@@ -209,19 +345,35 @@ void state()
     b->setStateInformation (data.getData(), (int) data.getSize());
 
     check (b->getCurve().size() == 2, "the curve is saved and restored");
+
+    a->setCurve (psyduck::makePreset (5), 1);
+    a->gridColumns.store (32);
+    juce::MemoryBlock more;
+    a->getStateInformation (more);
+    b->setStateInformation (more.getData(), (int) more.getSize());
+    check (b->getCurve (1).size() == 2 && b->getCurve (2).size() == 5, "band curves are saved and restored");
+    check (b->gridColumns.load() == 32, "the grid setting is saved and restored");
     check (juce::roundToInt (b->apvts.getRawParameterValue (psyduck::params::mode)->load()) == psyduck::params::modeAudio,
            "parameters are saved and restored");
 }
 } // namespace
 
 /** Renders the editor to a PNG so the layout can be checked without a DAW. */
-int screenshot (const juce::String& path, int mode)
+int screenshot (const juce::String& path, int mode, const juce::String& options)
 {
     auto p = make();
     setChoice (*p, psyduck::params::mode, mode);
+    if (options.contains ("multiband")) { setValue (*p, psyduck::params::multiband, 1.0f); p->editBand.store (1); p->setCurve (psyduck::makePreset (2), 1); }
+    if (options.contains ("filter")) setChoice (*p, psyduck::params::target, psyduck::params::targetFilter);
+    if (options.contains ("pan")) setChoice (*p, psyduck::params::target, psyduck::params::targetPan);
     run (*p, 48000, 0, -1);
 
     std::unique_ptr<juce::AudioProcessorEditor> editor (p->createEditor());
+    if (options.contains ("wave"))
+        if (auto* e = dynamic_cast<PsyDuckAudioProcessorEditor*> (editor.get()))
+            for (auto* child : e->getChildren())
+                if (auto* curve = dynamic_cast<CurveEditor*> (child))
+                    curve->showWaveform = true;
 
     const auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 2.0f);
     juce::File file (path);
@@ -237,7 +389,8 @@ int main (int argc, char** argv)
 
     if (argc >= 3 && juce::String (argv[1]) == "--screenshot")
         return screenshot (juce::File::getCurrentWorkingDirectory().getChildFile (argv[2]).getFullPathName(),
-                           argc >= 4 ? juce::String (argv[3]).getIntValue() : 0);
+                           argc >= 4 ? juce::String (argv[3]).getIntValue() : 0,
+                           argc >= 5 ? juce::String (argv[4]) : juce::String());
 
     syncMode();
     audioMode();
@@ -245,6 +398,11 @@ int main (int argc, char** argv)
     noteFilter();
     multibandAndInvert();
     followerMode();
+    threeBands();
+    filterAndPan();
+    longPattern();
+    alignment();
+    slots();
     state();
 
     if (failures == 0)

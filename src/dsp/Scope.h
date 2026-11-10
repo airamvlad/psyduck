@@ -3,53 +3,67 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 
 namespace psyduck
 {
 
-/** Peak levels of the kick (sidechain) and the bass (output) laid out along
-    the ducking cycle, so the UI can draw both under the curve.
-    The audio thread writes, the UI thread reads. */
+/** The kick (sidechain) and the bass (output) laid out along the ducking
+    cycle, so the UI can draw both under the curve. Every position keeps the
+    lowest and highest sample seen there, which gives both a waveform view and
+    a level view. The audio thread writes, the UI thread reads. */
 class Scope
 {
 public:
-    static constexpr int numBins = 256;
+    static constexpr int numBins = 512;
 
     Scope()
     {
-        for (auto& v : kick) v.store (0.0f);
-        for (auto& v : bass) v.store (0.0f);
+        for (auto* band : { &kickMin, &kickMax, &bassMin, &bassMax })
+            for (auto& v : *band)
+                v.store (0.0f);
     }
 
-    /** Audio thread. phase: position in the cycle, 0..1. */
-    void write (float phase, float kickLevel, float bassLevel) noexcept
+    /** Audio thread. phase: position in the cycle, 0..1. Samples are signed. */
+    void write (float phase, float kickSample, float bassSample) noexcept
     {
         const int bin = std::clamp ((int) (phase * (float) numBins), 0, numBins - 1);
 
         if (bin != currentBin)
         {
             currentBin = bin;
-            kickPeak = 0.0f;
-            bassPeak = 0.0f;
+            kLo = kHi = kickSample;
+            bLo = bHi = bassSample;
         }
 
-        kickPeak = std::max (kickPeak, kickLevel);
-        bassPeak = std::max (bassPeak, bassLevel);
-        kick[(std::size_t) bin].store (kickPeak, std::memory_order_relaxed);
-        bass[(std::size_t) bin].store (bassPeak, std::memory_order_relaxed);
+        kLo = std::min (kLo, kickSample);
+        kHi = std::max (kHi, kickSample);
+        bLo = std::min (bLo, bassSample);
+        bHi = std::max (bHi, bassSample);
+
+        const auto i = (std::size_t) bin;
+        kickMin[i].store (kLo, std::memory_order_relaxed);
+        kickMax[i].store (kHi, std::memory_order_relaxed);
+        bassMin[i].store (bLo, std::memory_order_relaxed);
+        bassMax[i].store (bHi, std::memory_order_relaxed);
     }
 
-    float getKick (int bin) const noexcept { return kick[(std::size_t) bin].load (std::memory_order_relaxed); }
-    float getBass (int bin) const noexcept { return bass[(std::size_t) bin].load (std::memory_order_relaxed); }
+    float getKickMin (int bin) const noexcept { return kickMin[(std::size_t) bin].load (std::memory_order_relaxed); }
+    float getKickMax (int bin) const noexcept { return kickMax[(std::size_t) bin].load (std::memory_order_relaxed); }
+    float getBassMin (int bin) const noexcept { return bassMin[(std::size_t) bin].load (std::memory_order_relaxed); }
+    float getBassMax (int bin) const noexcept { return bassMax[(std::size_t) bin].load (std::memory_order_relaxed); }
+
+    /** Peak level at a position, 0..1. */
+    float getKick (int bin) const noexcept { return std::max (std::abs (getKickMin (bin)), std::abs (getKickMax (bin))); }
+    float getBass (int bin) const noexcept { return std::max (std::abs (getBassMin (bin)), std::abs (getBassMax (bin))); }
 
 private:
-    std::array<std::atomic<float>, numBins> kick;
-    std::array<std::atomic<float>, numBins> bass;
+    using Bins = std::array<std::atomic<float>, numBins>;
+    Bins kickMin, kickMax, bassMin, bassMax;
 
     int currentBin = -1;
-    float kickPeak = 0.0f;
-    float bassPeak = 0.0f;
+    float kLo = 0.0f, kHi = 0.0f, bLo = 0.0f, bHi = 0.0f;
 };
 
 } // namespace psyduck

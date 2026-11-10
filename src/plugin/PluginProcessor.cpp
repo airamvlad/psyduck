@@ -1,7 +1,12 @@
 #include "PluginProcessor.h"
 
-#include "Parameters.h"
 #include "PluginEditor.h"
+
+namespace
+{
+const juce::Identifier altSlotType { "ALT" };
+const char* const curveProperties[] = { "curve", "curve1", "curve2" };
+} // namespace
 
 PsyDuckAudioProcessor::PsyDuckAudioProcessor()
     : AudioProcessor (BusesProperties()
@@ -10,19 +15,29 @@ PsyDuckAudioProcessor::PsyDuckAudioProcessor()
                           .withInput ("Sidechain", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "PsyDuck", psyduck::params::createLayout())
 {
-    rateParam = apvts.getRawParameterValue (psyduck::params::rate);
-    amountParam = apvts.getRawParameterValue (psyduck::params::amount);
-    mixParam = apvts.getRawParameterValue (psyduck::params::mix);
-    phaseParam = apvts.getRawParameterValue (psyduck::params::phase);
-    modeParam = apvts.getRawParameterValue (psyduck::params::mode);
-    thresholdParam = apvts.getRawParameterValue (psyduck::params::threshold);
-    retriggerParam = apvts.getRawParameterValue (psyduck::params::retrigger);
-    lookaheadParam = apvts.getRawParameterValue (psyduck::params::lookahead);
-    midiNoteParam = apvts.getRawParameterValue (psyduck::params::midiNote);
-    multibandParam = apvts.getRawParameterValue (psyduck::params::multiband);
-    crossoverParam = apvts.getRawParameterValue (psyduck::params::crossover);
-    invertParam = apvts.getRawParameterValue (psyduck::params::invert);
-    releaseParam = apvts.getRawParameterValue (psyduck::params::release);
+    using namespace psyduck::params;
+
+    rateParam = apvts.getRawParameterValue (rate);
+    amountParam = apvts.getRawParameterValue (amount);
+    mixParam = apvts.getRawParameterValue (mix);
+    phaseParam = apvts.getRawParameterValue (phase);
+    modeParam = apvts.getRawParameterValue (mode);
+    thresholdParam = apvts.getRawParameterValue (threshold);
+    retriggerParam = apvts.getRawParameterValue (retrigger);
+    lookaheadParam = apvts.getRawParameterValue (lookahead);
+    midiNoteParam = apvts.getRawParameterValue (midiNote);
+    multibandParam = apvts.getRawParameterValue (multiband);
+    crossoverParam = apvts.getRawParameterValue (crossover);
+    crossoverHighParam = apvts.getRawParameterValue (crossoverHigh);
+    bandAmountParams = { apvts.getRawParameterValue (amountLow),
+                         apvts.getRawParameterValue (amountMid),
+                         apvts.getRawParameterValue (amountHigh) };
+    invertParam = apvts.getRawParameterValue (invert);
+    releaseParam = apvts.getRawParameterValue (release);
+    targetParam = apvts.getRawParameterValue (target);
+    filterMinParam = apvts.getRawParameterValue (filterMin);
+    resonanceParam = apvts.getRawParameterValue (resonance);
+    bassDelayParam = apvts.getRawParameterValue (bassDelay);
 
     // Keeps the latency reported to the host in step with the Lookahead knob.
     startTimerHz (10);
@@ -48,21 +63,54 @@ void PsyDuckAudioProcessor::timerCallback()
 
 void PsyDuckAudioProcessor::prepareToPlay (double sampleRate, int)
 {
+    using namespace psyduck::params;
+
     sync.prepare (sampleRate);
-    gain.prepare (sampleRate);
     detector.prepare (sampleRate);
-    oneShot.reset();
     follower.prepare (sampleRate);
     phaseMeter.prepare (sampleRate);
+
+    for (auto& g : gains)
+        g.prepare (sampleRate);
+    for (auto& shot : oneShots)
+        shot.reset();
     for (auto& split : bandSplit)
         split.reset();
-    lastCrossover = 0.0f;
-    lastMultiband = false;
+    for (auto& filter : shaperFilter)
+        filter.reset();
 
-    const int maxDelay = (int) std::ceil ((double) psyduck::params::maxLookaheadMs * 0.001 * sampleRate) + 1;
+    panSmoothed = 0.0f;
+    panCoeff = (float) (1.0 - std::exp (-1.0 / (0.002 * sampleRate)));
+    lastSplit = false;
+    lastFilter = false;
+    lastCrossoverLow = lastCrossoverHigh = 0.0f;
+    filterCounter = 0;
+
+    const int maxDelay = (int) std::ceil ((double) (maxLookaheadMs + maxBassDelayMs) * 0.001 * sampleRate) + 1;
     for (auto& d : mainDelay)
         d.prepare (maxDelay);
     sidechainDelay.prepare (maxDelay);
+    phaseBassDelay.prepare (maxDelay);
+
+    // About 6 kHz is plenty for comparing the low end of kick and bass.
+    alignDecimation = juce::jmax (1, juce::roundToInt (sampleRate / 6000.0));
+    alignSampleRate = sampleRate / (double) alignDecimation;
+    for (int i = 0; i < 2; ++i)
+    {
+        alignKickFilter[i].set (false, 150.0, sampleRate);
+        alignBassFilter[i].set (false, 150.0, sampleRate);
+        alignKickFilter[i].reset();
+        alignBassFilter[i].reset();
+    }
+
+    {
+        const juce::SpinLock::ScopedLockType lock (alignLock);
+        const auto length = (size_t) juce::roundToInt (alignSampleRate * 2.0);
+        alignKick.assign (length, 0.0f);
+        alignBass.assign (length, 0.0f);
+        alignWrite = 0;
+        alignCounter = 0;
+    }
 
     setLatencySamples (lookaheadSamplesFor (sampleRate));
 }
@@ -85,6 +133,8 @@ bool PsyDuckAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) 
 
 void PsyDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
+    using namespace psyduck::params;
+
     juce::ScopedNoDenormals noDenormals;
 
     auto mainBuffer = getBusBuffer (buffer, false, 0);
@@ -113,60 +163,96 @@ void PsyDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
     if (bpm <= 0.0)
         bpm = 120.0;
 
-    const auto rateIndex = juce::jlimit (0, (int) psyduck::rateBeats.size() - 1,
-                                         (int) rateParam->load (std::memory_order_relaxed));
+    const auto load = [] (const std::atomic<float>* p) { return p->load (std::memory_order_relaxed); };
+
+    const auto rateIndex = juce::jlimit (0, (int) psyduck::rateBeats.size() - 1, (int) load (rateParam));
     const double beatsPerCycle = psyduck::rateBeats[(size_t) rateIndex];
-    const float amount = amountParam->load (std::memory_order_relaxed) * 0.01f;
-    const float mix = mixParam->load (std::memory_order_relaxed) * 0.01f;
-    const double offset = (double) phaseParam->load (std::memory_order_relaxed) / 360.0;
-    const int mode = juce::roundToInt (modeParam->load (std::memory_order_relaxed));
-    const float threshold = juce::Decibels::decibelsToGain (thresholdParam->load (std::memory_order_relaxed));
-    const int retriggerSamples = juce::roundToInt ((double) retriggerParam->load (std::memory_order_relaxed) * 0.001 * sampleRate);
-    const int lookahead = juce::jmin (lookaheadSamplesFor (sampleRate), mainDelay[0].getMaxDelay());
+    const float amount = load (amountParam) * 0.01f;
+    const float mix = load (mixParam) * 0.01f;
+    const double offset = (double) load (phaseParam) / 360.0;
+    const int mode = juce::roundToInt (load (modeParam));
+    const int target = juce::roundToInt (load (targetParam));
+    const float threshold = juce::Decibels::decibelsToGain (load (thresholdParam));
+    const int retriggerSamples = juce::roundToInt ((double) load (retriggerParam) * 0.001 * sampleRate);
+    const int noteFilter = juce::roundToInt (load (midiNoteParam));
+    const float polarity = load (invertParam) > 0.5f ? -1.0f : 1.0f;
+    const double filterLow = load (filterMinParam);
+    const double resonance = load (resonanceParam) * 0.01;
 
-    const int noteFilter = juce::roundToInt (midiNoteParam->load (std::memory_order_relaxed));
-    const bool multiband = multibandParam->load (std::memory_order_relaxed) > 0.5f;
-    const float crossover = crossoverParam->load (std::memory_order_relaxed);
-    const float polarity = invertParam->load (std::memory_order_relaxed) > 0.5f ? -1.0f : 1.0f;
+    const int lookahead = lookaheadSamplesFor (sampleRate);
+    const int bassDelaySamples = juce::roundToInt ((double) juce::jlimit (0.0f, maxBassDelayMs, load (bassDelayParam)) * 0.001 * sampleRate);
+    const int mainDelaySamples = juce::jmin (lookahead + bassDelaySamples, mainDelay[0].getMaxDelay());
 
-    follower.setRelease (releaseParam->load (std::memory_order_relaxed));
+    // Bands only make sense for volume; filter and pan work on the whole signal.
+    const bool split = load (multibandParam) > 0.5f && target == targetVolume;
+    const bool filtering = target == targetFilter;
+    const bool panning = target == targetPan && numChannels == 2;
+    const int bands = split ? numBands : 1;
 
-    if (multiband && (! lastMultiband || ! juce::approximatelyEqual (crossover, lastCrossover)))
+    float bandAmount[numBands] = { amount, amount, amount };
+    if (split)
+        for (int b = 0; b < numBands; ++b)
+            bandAmount[b] = amount * load (bandAmountParams[(size_t) b]) * 0.01f;
+
+    follower.setRelease (load (releaseParam));
+
+    if (split)
     {
-        for (auto& split : bandSplit)
+        const float low = load (crossoverParam);
+        const float high = juce::jmax (load (crossoverHighParam), low * 1.5f);
+
+        if (! lastSplit || ! juce::approximatelyEqual (low, lastCrossoverLow) || ! juce::approximatelyEqual (high, lastCrossoverHigh))
         {
-            split.setFrequency (crossover, sampleRate);
-            if (! lastMultiband)
-                split.reset();
+            for (auto& s : bandSplit)
+            {
+                s.setFrequencies (low, high, sampleRate);
+                if (! lastSplit)
+                    s.reset();
+            }
+            lastCrossoverLow = low;
+            lastCrossoverHigh = high;
         }
-        lastCrossover = crossover;
     }
-    lastMultiband = multiband;
+    lastSplit = split;
+
+    if (filtering && ! lastFilter)
+    {
+        for (auto& f : shaperFilter)
+            f.reset();
+        filterCounter = 0;
+    }
+    lastFilter = filtering;
 
     if (curveDirty.load (std::memory_order_acquire))
     {
         const juce::SpinLock::ScopedTryLockType lock (curveLock);
         if (lock.isLocked())
         {
-            audioCurve = sharedCurve;
+            audioCurves = sharedCurves;
             curveDirty.store (false, std::memory_order_release);
         }
     }
 
     if (mode != lastMode)
     {
-        oneShot.reset();
+        for (auto& shot : oneShots)
+            shot.reset();
         detector.reset();
         follower.reset();
         lastMode = mode;
     }
 
     sync.beginBlock (bpm, beatsPerCycle, playing, ppq);
-    oneShot.setLength (beatsPerCycle * 60.0 / bpm * sampleRate);
+    for (auto& shot : oneShots)
+        shot.setLength (beatsPerCycle * 60.0 / bpm * sampleRate);
 
     // The audio leaves the plugin `lookahead` samples late, so the synced curve
     // is shifted by the same amount to stay on the grid.
     const double syncOffset = offset - (double) lookahead * sync.getIncrement();
+
+    const juce::SpinLock::ScopedTryLockType alignGuard (alignLock);
+    const bool recording = alignGuard.isLocked() && ! alignKick.empty() && numSidechain > 0;
+    const bool frozen = scopeFrozen.load (std::memory_order_relaxed);
 
     auto midiIt = midi.begin();
     const auto midiEnd = midi.end();
@@ -181,6 +267,7 @@ void PsyDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
             sidechainLevel = juce::jmax (sidechainLevel, std::abs (v));
             sidechainSum += v;
         }
+        const float sidechainMono = numSidechain > 0 ? sidechainSum / (float) numSidechain : 0.0f;
 
         bool noteOn = false;
         while (midiIt != midiEnd && (*midiIt).samplePosition <= i)
@@ -196,63 +283,122 @@ void PsyDuckAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce
         const bool hit = detector.process (sidechainLevel, threshold, retriggerSamples);
         const float followed = follower.process (sidechainLevel, threshold);
 
-        float curveValue = 1.0f;
+        float curveValue[numBands] = { 1.0f, 1.0f, 1.0f };
+        bool idle = false;
 
-        if (mode == psyduck::params::modeSync)
+        if (mode == modeSync)
         {
-            curveValue = audioCurve.evaluate (syncPhase);
+            for (int b = 0; b < bands; ++b)
+                curveValue[b] = audioCurves[(size_t) b].evaluate (syncPhase);
             displayed = syncPhase;
         }
-        else if (mode == psyduck::params::modeFollower)
+        else if (mode == modeFollower)
         {
-            curveValue = followed;
+            for (int b = 0; b < bands; ++b)
+                curveValue[b] = followed;
             displayed = syncPhase;
         }
         else
         {
-            if (mode == psyduck::params::modeAudio ? hit : noteOn)
-                oneShot.trigger (lookahead);
+            const bool trigger = mode == modeAudio ? hit : noteOn;
 
-            curveValue = oneShot.next (audioCurve);
-            displayed = oneShot.getPhase();
+            for (int b = 0; b < numBands; ++b)
+            {
+                if (trigger)
+                    oneShots[(size_t) b].trigger (lookahead);
+
+                const float v = oneShots[(size_t) b].next (audioCurves[(size_t) b]);
+                if (b < bands)
+                    curveValue[b] = v;
+            }
+
+            idle = oneShots[0].isIdle();
+            displayed = oneShots[0].getPhase();
         }
 
-        const float g = gain.next (curveValue, amount, mix);
+        float g[numBands];
+        for (int b = 0; b < numBands; ++b)
+            g[b] = gains[(size_t) b].next (b < bands ? curveValue[b] : 1.0f, bandAmount[b], mix);
 
-        float outputLevel = 0.0f, inputSum = 0.0f;
+        float panLeft = 1.0f, panRight = 1.0f;
+        if (panning)
+        {
+            // Curve middle is centre, bottom is left, top is right. Waiting for a trigger: centre.
+            const float position = idle ? 0.0f : (curveValue[0] * 2.0f - 1.0f) * amount * mix;
+            panSmoothed += (position - panSmoothed) * panCoeff;
+            panLeft = juce::jmin (1.0f, 1.0f - panSmoothed);
+            panRight = juce::jmin (1.0f, 1.0f + panSmoothed);
+        }
+
+        if (filtering && --filterCounter <= 0)
+        {
+            filterCounter = 8;
+            const double cutoff = psyduck::ShaperFilter::cutoffFor (g[0], filterLow);
+            for (auto& f : shaperFilter)
+                f.set (cutoff, resonance, sampleRate);
+        }
+
+        float outputSum = 0.0f, inputSum = 0.0f;
         for (int ch = 0; ch < numChannels; ++ch)
         {
             auto* data = mainBuffer.getWritePointer (ch);
             const float in = data[i] * polarity;
             inputSum += in;
 
-            const float delayed = mainDelay[(size_t) ch].process (in, lookahead);
+            const float delayed = mainDelay[(size_t) ch].process (in, mainDelaySamples);
             float out = 0.0f;
 
-            if (multiband)
+            if (split)
             {
-                // Only the low band is ducked, the rest passes untouched.
-                float low = 0.0f, high = 0.0f;
-                bandSplit[(size_t) ch].process (delayed, low, high);
-                out = low * g + high;
+                float low = 0.0f, mid = 0.0f, high = 0.0f;
+                bandSplit[(size_t) ch].process (delayed, low, mid, high);
+                out = low * g[0] + mid * g[1] + high * g[2];
+            }
+            else if (filtering)
+            {
+                out = shaperFilter[(size_t) ch].process (delayed);
+            }
+            else if (panning)
+            {
+                out = delayed * (ch == 0 ? panLeft : panRight);
             }
             else
             {
-                out = delayed * g;
+                out = delayed * g[0];
             }
 
             data[i] = out;
-            outputLevel = juce::jmax (outputLevel, std::abs (out));
+            outputSum += out;
         }
 
-        // Phase check uses the bass before ducking, where it overlaps the kick.
-        if (numSidechain > 0 && numChannels > 0)
-            phaseMeter.process (sidechainSum / (float) numSidechain, inputSum / (float) numChannels);
+        const float inputMono = numChannels > 0 ? inputSum / (float) numChannels : 0.0f;
+        const float outputMono = numChannels > 0 ? outputSum / (float) numChannels : 0.0f;
 
-        const float delayedSidechain = sidechainDelay.process (sidechainLevel, lookahead);
+        // Phase check uses the bass before ducking, where it overlaps the kick,
+        // with the Bass Delay applied so the meter shows the effect of the knob.
+        const float shiftedBass = phaseBassDelay.process (inputMono, bassDelaySamples);
+        if (numSidechain > 0)
+            phaseMeter.process (sidechainMono, shiftedBass);
 
-        if (displayed >= 0.0f)
-            scope.write (displayed, delayedSidechain, outputLevel);
+        if (recording)
+        {
+            const float k = alignKickFilter[1].process (alignKickFilter[0].process (sidechainMono));
+            const float b = alignBassFilter[1].process (alignBassFilter[0].process (inputMono * polarity));   // undo Invert: record the raw bass
+
+            if (++alignCounter >= alignDecimation)
+            {
+                alignCounter = 0;
+                alignKick[(size_t) alignWrite] = k;
+                alignBass[(size_t) alignWrite] = b;
+                if (++alignWrite >= (int) alignKick.size())
+                    alignWrite = 0;
+            }
+        }
+
+        const float delayedSidechain = sidechainDelay.process (sidechainMono, lookahead);
+
+        if (displayed >= 0.0f && ! frozen)
+            scope.write (displayed, delayedSidechain, outputMono);
     }
 
     phaseValid.store (numSidechain > 0 && phaseMeter.hasSignal(), std::memory_order_relaxed);
@@ -265,26 +411,27 @@ juce::AudioProcessorEditor* PsyDuckAudioProcessor::createEditor()
     return new PsyDuckAudioProcessorEditor (*this);
 }
 
-psyduck::Curve PsyDuckAudioProcessor::getCurve() const
+//==============================================================================
+psyduck::Curve PsyDuckAudioProcessor::getCurve (int band) const
 {
     const juce::SpinLock::ScopedLockType lock (curveLock);
-    return sharedCurve;
+    return sharedCurves[(size_t) juce::jlimit (0, numBands - 1, band)];
 }
 
-void PsyDuckAudioProcessor::setCurve (const psyduck::Curve& newCurve)
+void PsyDuckAudioProcessor::setCurve (const psyduck::Curve& newCurve, int band)
 {
     {
         const juce::SpinLock::ScopedLockType lock (curveLock);
-        sharedCurve = newCurve;
+        sharedCurves[(size_t) juce::jlimit (0, numBands - 1, band)] = newCurve;
         curveDirty.store (true, std::memory_order_release);
     }
 
     curveVersion.fetch_add (1, std::memory_order_relaxed);
 }
 
-void PsyDuckAudioProcessor::beginCurveEdit()
+void PsyDuckAudioProcessor::beginCurveEdit (int band)
 {
-    undoStack.push_back (getCurve());
+    undoStack.push_back ({ band, getCurve (band) });
     if (undoStack.size() > 100)
         undoStack.erase (undoStack.begin());
     redoStack.clear();
@@ -295,9 +442,11 @@ void PsyDuckAudioProcessor::undoCurve()
     if (undoStack.empty())
         return;
 
-    redoStack.push_back (getCurve());
-    setCurve (undoStack.back());
+    const auto step = undoStack.back();
     undoStack.pop_back();
+    redoStack.push_back ({ step.band, getCurve (step.band) });
+    setCurve (step.curve, step.band);
+    editBand.store (step.band);
     curveEditFinished();
 }
 
@@ -306,9 +455,11 @@ void PsyDuckAudioProcessor::redoCurve()
     if (redoStack.empty())
         return;
 
-    undoStack.push_back (getCurve());
-    setCurve (redoStack.back());
+    const auto step = redoStack.back();
     redoStack.pop_back();
+    undoStack.push_back ({ step.band, getCurve (step.band) });
+    setCurve (step.curve, step.band);
+    editBand.store (step.band);
     curveEditFinished();
 }
 
@@ -352,11 +503,106 @@ bool PsyDuckAudioProcessor::curveFromString (const juce::String& text, psyduck::
     return true;
 }
 
+//==============================================================================
+psyduck::Alignment PsyDuckAudioProcessor::findAlignment (float& lagMs)
+{
+    std::vector<float> kick, bass;
+    double rate = 6000.0;
+
+    {
+        const juce::SpinLock::ScopedLockType lock (alignLock);
+        const auto n = alignKick.size();
+        kick.resize (n);
+        bass.resize (n);
+
+        // Unroll the ring so the oldest sample comes first.
+        for (size_t i = 0; i < n; ++i)
+        {
+            const auto from = ((size_t) alignWrite + i) % n;
+            kick[i] = alignKick[from];
+            bass[i] = alignBass[from];
+        }
+
+        rate = alignSampleRate;
+    }
+
+    const int maxLag = juce::roundToInt ((double) psyduck::params::maxBassDelayMs * 0.001 * rate);
+    const auto result = psyduck::findBestAlignment (kick, bass, maxLag);
+    lagMs = (float) ((double) result.lag * 1000.0 / rate);
+    return result;
+}
+
+//==============================================================================
+juce::ValueTree PsyDuckAudioProcessor::createState() const
+{
+    auto state = const_cast<juce::AudioProcessorValueTreeState&> (apvts).copyState();
+
+    // A leftover copy of the other A/B slot must never nest inside this one.
+    while (state.getChildWithName (altSlotType).isValid())
+        state.removeChild (state.getChildWithName (altSlotType), nullptr);
+
+    for (int b = 0; b < numBands; ++b)
+        state.setProperty (curveProperties[b], curveToString (getCurve (b)), nullptr);
+
+    state.setProperty ("snap", snapToGrid.load(), nullptr);
+    state.setProperty ("grid", gridColumns.load(), nullptr);
+    return state;
+}
+
+void PsyDuckAudioProcessor::applyState (const juce::ValueTree& source)
+{
+    auto state = source.createCopy();
+
+    while (state.getChildWithName (altSlotType).isValid())
+        state.removeChild (state.getChildWithName (altSlotType), nullptr);
+
+    for (int b = 0; b < numBands; ++b)
+    {
+        psyduck::Curve loaded;
+        if (curveFromString (state.getProperty (curveProperties[b]).toString(), loaded))
+            setCurve (loaded, b);
+    }
+
+    snapToGrid.store ((bool) state.getProperty ("snap", true));
+    gridColumns.store (juce::jlimit (4, 64, (int) state.getProperty ("grid", 16)));
+
+    apvts.replaceState (state);
+}
+
+void PsyDuckAudioProcessor::switchSlot()
+{
+    slots[(size_t) activeSlot] = createState();
+    activeSlot = 1 - activeSlot;
+
+    // An empty slot starts as a copy of the other one.
+    if (slots[(size_t) activeSlot].isValid())
+        applyState (slots[(size_t) activeSlot]);
+
+    undoStack.clear();
+    redoStack.clear();
+    curveEditFinished();
+}
+
+void PsyDuckAudioProcessor::copyToOtherSlot()
+{
+    slots[(size_t) (1 - activeSlot)] = createState();
+    curveEditFinished();
+}
+
 void PsyDuckAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    auto state = apvts.copyState();
-    state.setProperty ("curve", curveToString (getCurve()), nullptr);
-    state.setProperty ("snap", snapToGrid.load(), nullptr);
+    auto state = createState();
+    state.setProperty ("slot", activeSlot, nullptr);
+    state.setProperty ("width", editorWidth.load(), nullptr);
+    state.setProperty ("height", editorHeight.load(), nullptr);
+
+    const auto& other = slots[(size_t) (1 - activeSlot)];
+    if (other.isValid())
+    {
+        juce::ValueTree alt (altSlotType);
+        alt.appendChild (other.createCopy(), nullptr);
+        state.appendChild (alt, nullptr);
+    }
 
     if (const auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
@@ -364,21 +610,24 @@ void PsyDuckAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 
 void PsyDuckAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    if (const auto xml = getXmlFromBinary (data, sizeInBytes))
-    {
-        if (xml->hasTagName (apvts.state.getType()))
-        {
-            const auto state = juce::ValueTree::fromXml (*xml);
+    const auto xml = getXmlFromBinary (data, sizeInBytes);
+    if (xml == nullptr || ! xml->hasTagName (apvts.state.getType()))
+        return;
 
-            psyduck::Curve loaded;
-            if (curveFromString (state.getProperty ("curve").toString(), loaded))
-                setCurve (loaded);
+    const auto state = juce::ValueTree::fromXml (*xml);
 
-            snapToGrid.store ((bool) state.getProperty ("snap", true));
+    activeSlot = juce::jlimit (0, 1, (int) state.getProperty ("slot", 0));
+    editorWidth.store (juce::jlimit (400, 4000, (int) state.getProperty ("width", editorWidth.load())));
+    editorHeight.store (juce::jlimit (300, 3000, (int) state.getProperty ("height", editorHeight.load())));
 
-            apvts.replaceState (state);
-        }
-    }
+    slots = {};
+    const auto alt = state.getChildWithName (altSlotType);
+    if (alt.isValid() && alt.getNumChildren() > 0)
+        slots[(size_t) (1 - activeSlot)] = alt.getChild (0).createCopy();
+
+    applyState (state);
+    undoStack.clear();
+    redoStack.clear();
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

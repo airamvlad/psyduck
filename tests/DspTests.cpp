@@ -5,8 +5,11 @@
 #include "dsp/EnvelopeFollower.h"
 #include "dsp/GainProcessor.h"
 #include "dsp/OneShot.h"
+#include "dsp/PhaseAlign.h"
 #include "dsp/PhaseMeter.h"
 #include "dsp/Presets.h"
+#include "dsp/Scope.h"
+#include "dsp/ShaperFilter.h"
 #include "dsp/SyncEngine.h"
 #include "dsp/TriggerDetector.h"
 
@@ -356,8 +359,8 @@ void suggestTests()
 {
     psyduck::Curve c;
 
-    std::vector<float> silence (256, 0.0f);
-    check (! psyduck::suggestCurve (silence, c), "no suggestion without a kick");
+    std::vector<float> noKick (256, 0.0f);
+    check (! psyduck::suggestCurve (noKick, c), "no suggestion without a kick");
 
     // Kick at the start of the cycle, fading over roughly a third of it.
     std::vector<float> kick (256, 0.0f);
@@ -378,6 +381,113 @@ void suggestTests()
     check (near (c.evaluate (0.2f), 1.0), "suggestion stays open before a late kick");
     check (near (c.evaluate (0.51f), 0.0), "suggestion ducks where the late kick is");
 }
+double threeBandRms (double frequency, int band)
+{
+    const double sr = 48000.0;
+    psyduck::ThreeBandSplit split;
+    split.setFrequencies (150.0, 2500.0, sr);
+
+    double sum = 0.0;
+    int count = 0;
+    for (int n = 0; n < 48000; ++n)
+    {
+        const float x = (float) std::sin (2.0 * 3.14159265358979 * frequency * n / sr);
+        float low = 0.0f, mid = 0.0f, high = 0.0f;
+        split.process (x, low, mid, high);
+        const double v = band == 0 ? low : band == 1 ? mid : band == 2 ? high : (double) low + mid + high;
+        if (n > 24000)
+        {
+            sum += v * v;
+            ++count;
+        }
+    }
+    return std::sqrt (sum / count);
+}
+
+void threeBandTests()
+{
+    const double full = std::sqrt (0.5);
+    check (near (threeBandRms (40.0, 0), full, 0.03), "low band holds the sub");
+    check (near (threeBandRms (600.0, 1), full, 0.03), "mid band holds the mids");
+    check (near (threeBandRms (10000.0, 2), full, 0.03), "high band holds the highs");
+    check (threeBandRms (40.0, 1) < 0.01 && threeBandRms (40.0, 2) < 0.001, "sub stays out of mid and high");
+    check (threeBandRms (10000.0, 0) < 0.001 && threeBandRms (10000.0, 1) < 0.01, "highs stay out of low and mid");
+
+    for (double f : { 40.0, 150.0, 400.0, 2500.0, 6000.0, 12000.0 })
+        check (near (threeBandRms (f, 3), full, 0.02), "three bands add back up to the full level");
+}
+
+double filteredRms (double frequency, double cutoff)
+{
+    const double sr = 48000.0;
+    psyduck::ShaperFilter f;
+    f.set (cutoff, 0.0, sr);
+    double sum = 0.0;
+    int count = 0;
+    for (int n = 0; n < 24000; ++n)
+    {
+        const float y = f.process ((float) std::sin (2.0 * 3.14159265358979 * frequency * n / sr));
+        if (n > 12000)
+        {
+            sum += (double) y * y;
+            ++count;
+        }
+    }
+    return std::sqrt (sum / count);
+}
+
+void filterTests()
+{
+    const double full = std::sqrt (0.5);
+    check (near (filteredRms (100.0, 5000.0), full, 0.02), "shaper filter passes what is below the cutoff");
+    check (filteredRms (5000.0, 200.0) < 0.01, "shaper filter removes what is above the cutoff");
+    check (near (psyduck::ShaperFilter::cutoffFor (0.0f, 80.0), 80.0, 0.01), "curve bottom gives the lowest cutoff");
+    check (near (psyduck::ShaperFilter::cutoffFor (1.0f, 80.0), 20000.0, 0.5), "curve top opens the filter");
+}
+
+void scopeTests()
+{
+    psyduck::Scope scope;
+    scope.write (0.5f, 0.2f, -0.3f);
+    scope.write (0.5f, -0.6f, 0.1f);
+    const int bin = psyduck::Scope::numBins / 2;
+    check (near (scope.getKickMin (bin), -0.6) && near (scope.getKickMax (bin), 0.2), "scope keeps the kick waveform range");
+    check (near (scope.getKick (bin), 0.6) && near (scope.getBass (bin), 0.3), "scope reports peak levels");
+}
+
+void alignTests()
+{
+    const double sr = 6000.0;
+    const int n = 6000;
+
+    const auto tone = [&] (double delaySamples, double sign)
+    {
+        std::vector<float> v ((size_t) n);
+        for (int i = 0; i < n; ++i)
+        {
+            const double t = ((double) i - delaySamples) / sr;
+            // Decaying 55 Hz bursts, four per second, like a kick tail.
+            const double local = std::fmod (t + 10.0, 0.25);
+            v[(size_t) i] = (float) (sign * std::exp (-local * 14.0) * std::sin (2.0 * 3.14159265358979 * 55.0 * local));
+        }
+        return v;
+    };
+
+    const auto kick = tone (12.0, 1.0);
+
+    auto same = psyduck::findBestAlignment (kick, tone (12.0, 1.0), 60);
+    check (same.valid && same.lag == 0 && ! same.invert && same.after > 0.98f, "aligned signals need no change");
+
+    auto early = psyduck::findBestAlignment (kick, tone (0.0, 1.0), 60);
+    check (early.valid && early.lag == 12 && ! early.invert, "a bass that is early gets delayed to match");
+    check (early.after > early.before + 0.1f, "alignment improves the match");
+
+    auto flipped = psyduck::findBestAlignment (kick, tone (12.0, -1.0), 60);
+    check (flipped.valid && flipped.invert && flipped.lag == 0, "an inverted bass gets flipped");
+
+    std::vector<float> silence ((size_t) n, 0.0f);
+    check (! psyduck::findBestAlignment (kick, silence, 60).valid, "no alignment without a bass");
+}
 } // namespace
 
 int main()
@@ -393,6 +503,10 @@ int main()
     phaseTests();
     followerTests();
     suggestTests();
+    threeBandTests();
+    filterTests();
+    scopeTests();
+    alignTests();
 
     if (failures == 0)
         std::printf ("All DSP tests passed.\n");

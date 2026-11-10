@@ -68,4 +68,40 @@ private:
     Biquad lp[2], hp[2];
 };
 
+/** Splits into low, mid and high. The three bands add back up to the full
+    signal with a flat level. */
+class ThreeBandSplit
+{
+public:
+    void reset() noexcept
+    {
+        lowSplit.reset();
+        highSplit.reset();
+        lowAlign.reset();
+    }
+
+    void setFrequencies (double lowHz, double highHz, double sampleRate) noexcept
+    {
+        lowSplit.setFrequency (lowHz, sampleRate);
+        highSplit.setFrequency (highHz, sampleRate);
+        lowAlign.setFrequency (highHz, sampleRate);
+    }
+
+    void process (float x, float& low, float& mid, float& high) noexcept
+    {
+        float lowRaw = 0.0f, rest = 0.0f;
+        lowSplit.process (x, lowRaw, rest);
+        highSplit.process (rest, mid, high);
+
+        // Give the low band the same phase shift the upper split adds,
+        // otherwise the bands would not add up flat.
+        float a = 0.0f, b = 0.0f;
+        lowAlign.process (lowRaw, a, b);
+        low = a + b;
+    }
+
+private:
+    BandSplit lowSplit, highSplit, lowAlign;
+};
+
 } // namespace psyduck
