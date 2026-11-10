@@ -495,7 +495,16 @@ PsyDuckAudioProcessorEditor::PsyDuckAudioProcessorEditor (PsyDuckAudioProcessor&
     setupKnob (release, psyduck::params::release, "Release");
     setupKnob (lookahead, psyduck::params::lookahead, "Lookahead");
     setupKnob (crossover, psyduck::params::crossover, "Crossover");
-    crossover.label.setVisible (false);
+    crossover.label.setFont (juce::FontOptions (12.0f));
+
+    // Units next to the numbers, so it is clear what each knob sets.
+    amount.slider.setTextValueSuffix (" %");
+    mix.slider.setTextValueSuffix (" %");
+    threshold.slider.setTextValueSuffix (" dB");
+    retrigger.slider.setTextValueSuffix (" ms");
+    release.slider.setTextValueSuffix (" ms");
+    lookahead.slider.setTextValueSuffix (" ms");
+    crossover.slider.setTextValueSuffix (" Hz");
 
     for (auto* button : { &multibandButton, &invertButton })
     {
@@ -833,6 +842,7 @@ void PsyDuckAudioProcessorEditor::resized()
 
     auto bandSlot = next();
     multibandButton.setBounds (bandSlot.removeFromTop (20).reduced (2, 0));
+    crossover.label.setBounds (bandSlot.removeFromTop (14));
     crossover.slider.setBounds (bandSlot);
 
     auto phaseSlot = controls;
