@@ -10,6 +10,8 @@ const juce::Colour panel { 0xff1d2029 };
 const juce::Colour grid { 0xff2c313d };
 const juce::Colour accent { 0xff7dffb0 };
 const juce::Colour text { 0xffd7dbe6 };
+const juce::Colour kickColour { 0xffff9a4d };
+const juce::Colour bassColour { 0xff5aa9ff };
 
 constexpr float pointRadius = 6.0f;
 constexpr float bendRadius = 4.0f;
@@ -200,6 +202,43 @@ void CurveEditor::paint (juce::Graphics& g)
         g.drawHorizontalLine (juce::roundToInt (y), plot.getX(), plot.getRight());
     }
 
+    // Kick (sidechain) and bass (output) levels along the cycle.
+    const auto& scope = processor.getScope();
+    const auto drawLevels = [&] (bool kick, juce::Colour colour)
+    {
+        juce::Path shape;
+        shape.startNewSubPath (plot.getX(), plot.getBottom());
+
+        for (int bin = 0; bin < psyduck::Scope::numBins; ++bin)
+        {
+            const float level = juce::jlimit (0.0f, 1.0f, kick ? scope.getKick (bin) : scope.getBass (bin));
+            const float x0 = plot.getX() + plot.getWidth() * (float) bin / (float) psyduck::Scope::numBins;
+            const float x1 = plot.getX() + plot.getWidth() * (float) (bin + 1) / (float) psyduck::Scope::numBins;
+            const float y = plot.getBottom() - plot.getHeight() * level;
+            shape.lineTo (x0, y);
+            shape.lineTo (x1, y);
+        }
+
+        shape.lineTo (plot.getRight(), plot.getBottom());
+        shape.closeSubPath();
+        g.setColour (colour.withAlpha (0.30f));
+        g.fillPath (shape);
+    };
+
+    drawLevels (false, bassColour);
+    drawLevels (true, kickColour);
+
+    const int mode = juce::roundToInt (processor.apvts.getRawParameterValue (psyduck::params::mode)->load());
+
+    if (mode == psyduck::params::modeAudio)
+    {
+        const float thresholdGain = juce::Decibels::decibelsToGain (
+            processor.apvts.getRawParameterValue (psyduck::params::threshold)->load());
+        const float y = plot.getBottom() - plot.getHeight() * juce::jlimit (0.0f, 1.0f, thresholdGain);
+        g.setColour (kickColour.withAlpha (0.8f));
+        g.drawHorizontalLine (juce::roundToInt (y), plot.getX(), plot.getRight());
+    }
+
     const int steps = juce::jmax (2, juce::roundToInt (plot.getWidth()));
 
     juce::Path line;
@@ -219,14 +258,24 @@ void CurveEditor::paint (juce::Graphics& g)
     fill.lineTo (plot.getX(), plot.getBottom());
     fill.closeSubPath();
 
-    g.setColour (accent.withAlpha (0.15f));
+    g.setColour (accent.withAlpha (0.08f));
     g.fillPath (fill);
     g.setColour (accent);
     g.strokePath (line, juce::PathStrokeType (2.0f));
 
-    const float playheadX = plot.getX() + plot.getWidth() * processor.getDisplayPhase();
-    g.setColour (text.withAlpha (0.6f));
-    g.drawVerticalLine (juce::roundToInt (playheadX), plot.getY(), plot.getBottom());
+    const float playhead = processor.getDisplayPhase();
+    if (playhead >= 0.0f)
+    {
+        const float playheadX = plot.getX() + plot.getWidth() * playhead;
+        g.setColour (text.withAlpha (0.6f));
+        g.drawVerticalLine (juce::roundToInt (playheadX), plot.getY(), plot.getBottom());
+    }
+
+    g.setFont (juce::FontOptions (11.0f));
+    g.setColour (kickColour);
+    g.drawText ("KICK (sidechain)", plot.reduced (6.0f, 4.0f).removeFromTop (14.0f), juce::Justification::topRight);
+    g.setColour (bassColour);
+    g.drawText ("BASS (output)", plot.reduced (6.0f, 4.0f).translated (0.0f, 14.0f).removeFromTop (14.0f), juce::Justification::topRight);
 
     for (std::size_t i = 0; i + 1 < curve.size(); ++i)
     {
@@ -271,6 +320,11 @@ PsyDuckAudioProcessorEditor::PsyDuckAudioProcessorEditor (PsyDuckAudioProcessor&
     };
     addAndMakeVisible (presetBox);
 
+    modeBox.addItemList ({ "Sync", "Audio trigger", "MIDI trigger" }, 1);
+    addAndMakeVisible (modeBox);
+    modeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
+        processor.apvts, psyduck::params::mode, modeBox);
+
     hint.setText ("Drag points. Double-click to add or remove a point. Drag the small ring to bend a segment.",
                   juce::dontSendNotification);
     hint.setFont (juce::FontOptions (12.0f));
@@ -293,10 +347,13 @@ PsyDuckAudioProcessorEditor::PsyDuckAudioProcessorEditor (PsyDuckAudioProcessor&
     setupKnob (amount, psyduck::params::amount, "Amount");
     setupKnob (mix, psyduck::params::mix, "Mix");
     setupKnob (phase, psyduck::params::phase, "Phase");
+    setupKnob (threshold, psyduck::params::threshold, "Threshold");
+    setupKnob (retrigger, psyduck::params::retrigger, "Retrigger");
+    setupKnob (lookahead, psyduck::params::lookahead, "Lookahead");
 
     setResizable (true, true);
-    setResizeLimits (560, 400, 1400, 900);
-    setSize (720, 480);
+    setResizeLimits (700, 420, 1600, 1000);
+    setSize (820, 520);
 }
 
 void PsyDuckAudioProcessorEditor::setupKnob (Knob& knob, const char* paramId, const juce::String& title)
@@ -332,6 +389,8 @@ void PsyDuckAudioProcessorEditor::resized()
 
     auto header = area.removeFromTop (28);
     presetBox.setBounds (header.removeFromRight (190));
+    header.removeFromRight (10);
+    modeBox.setBounds (header.removeFromRight (140));
     area.removeFromTop (10);
 
     auto controls = area.removeFromBottom (110);
@@ -340,13 +399,13 @@ void PsyDuckAudioProcessorEditor::resized()
     area.removeFromBottom (4);
     curveEditor.setBounds (area);
 
-    const int column = controls.getWidth() / 4;
+    const int column = controls.getWidth() / 7;
 
     auto rateArea = controls.removeFromLeft (column);
     rateLabel.setBounds (rateArea.removeFromTop (20));
     rateBox.setBounds (rateArea.withSizeKeepingCentre (juce::jmin (110, rateArea.getWidth() - 10), 28));
 
-    for (auto* knob : { &amount, &mix, &phase })
+    for (auto* knob : { &amount, &mix, &phase, &threshold, &retrigger, &lookahead })
     {
         auto knobArea = controls.removeFromLeft (column);
         knob->label.setBounds (knobArea.removeFromTop (20));

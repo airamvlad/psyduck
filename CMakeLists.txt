@@ -31,7 +31,7 @@ if(PSYDUCK_BUILD_PLUGIN)
         PLUGIN_CODE Pdk1
         FORMATS VST3
         IS_SYNTH FALSE
-        NEEDS_MIDI_INPUT FALSE
+        NEEDS_MIDI_INPUT TRUE
         NEEDS_MIDI_OUTPUT FALSE
         IS_MIDI_EFFECT FALSE
         VST3_CATEGORIES Fx Dynamics
@@ -63,4 +63,15 @@ if(PSYDUCK_BUILD_TESTS)
     add_executable(psyduck_dsp_tests tests/DspTests.cpp)
     target_link_libraries(psyduck_dsp_tests PRIVATE psyduck_dsp)
     add_test(NAME psyduck_dsp_tests COMMAND psyduck_dsp_tests)
+
+    if(PSYDUCK_BUILD_PLUGIN)
+        # Runs the real plugin processor offline: modes, lookahead, state.
+        add_executable(psyduck_plugin_tests tests/PluginTests.cpp)
+        target_include_directories(psyduck_plugin_tests PRIVATE src
+            $<TARGET_PROPERTY:PsyDuck,INCLUDE_DIRECTORIES>)
+        target_compile_definitions(psyduck_plugin_tests PRIVATE
+            $<TARGET_PROPERTY:PsyDuck,COMPILE_DEFINITIONS>)
+        target_link_libraries(psyduck_plugin_tests PRIVATE PsyDuck)
+        add_test(NAME psyduck_plugin_tests COMMAND psyduck_plugin_tests)
+    endif()
 endif()

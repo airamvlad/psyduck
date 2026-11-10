@@ -1,7 +1,10 @@
 #include "dsp/Curve.h"
+#include "dsp/DelayLine.h"
 #include "dsp/GainProcessor.h"
+#include "dsp/OneShot.h"
 #include "dsp/Presets.h"
 #include "dsp/SyncEngine.h"
+#include "dsp/TriggerDetector.h"
 
 #include <cmath>
 #include <cstdio>
@@ -163,6 +166,96 @@ void gainTests()
     check (biggestStep < 0.05f, "gain is smoothed across a hard curve jump");
     check (previous < 0.001f, "gain settles on the target within 10 ms");
 }
+void triggerTests()
+{
+    const double sr = 48000.0;
+    const float threshold = 0.25f;
+    const int retrigger = (int) (0.080 * sr);
+
+    psyduck::TriggerDetector d;
+    d.prepare (sr);
+
+    // Four decaying 50 Hz "kicks", 0.4 s apart, must give exactly four triggers.
+    int triggers = 0;
+    int firstTrigger = -1;
+    const int kickSpacing = (int) (0.4 * sr);
+    for (int n = 0; n < kickSpacing * 4; ++n)
+    {
+        const int t = n % kickSpacing;
+        const double env = std::exp (-(double) t / (0.12 * sr));
+        const float x = (float) (env * std::sin (2.0 * 3.14159265358979 * 50.0 * (double) t / sr + 1.2));
+        if (d.process (std::abs (x), threshold, retrigger))
+        {
+            ++triggers;
+            if (firstTrigger < 0)
+                firstTrigger = n;
+        }
+    }
+    check (triggers == 4, "each kick triggers exactly once");
+    check (firstTrigger >= 0 && firstTrigger < 48, "the trigger fires within a millisecond of the hit");
+
+    psyduck::TriggerDetector quiet;
+    quiet.prepare (sr);
+    bool fired = false;
+    for (int n = 0; n < 48000; ++n)
+        fired = fired || quiet.process (0.1f, threshold, retrigger);
+    check (! fired, "signal below the threshold never triggers");
+}
+
+void oneShotTests()
+{
+    psyduck::Curve c;
+    psyduck::OneShot shot;
+    shot.reset();
+    shot.setLength (1000.0);
+
+    check (near (shot.next (c), 1.0), "idle one-shot does not duck");
+    check (shot.getPhase() < 0.0f, "idle one-shot reports no position");
+
+    // Without lookahead the curve starts on the trigger sample.
+    shot.trigger (0);
+    check (near (shot.next (c), c.evaluate (0.0f)), "trigger starts the curve immediately");
+    for (int i = 0; i < 499; ++i)
+        shot.next (c);
+    check (near (shot.getPhase(), 0.5, 1.0e-3), "one-shot follows the cycle length");
+    for (int i = 0; i < 600; ++i)
+        shot.next (c);
+    check (! shot.isActive() && near (shot.next (c), 1.0), "one-shot returns to unity when the curve ends");
+
+    // With lookahead the gain glides down and the curve starts exactly on time.
+    shot.reset();
+    shot.trigger (100);
+    float previous = 1.0f, biggestStep = 0.0f;
+    for (int i = 0; i < 100; ++i)
+    {
+        const float v = shot.next (c);
+        biggestStep = std::max (biggestStep, std::abs (v - previous));
+        previous = v;
+        check (! shot.isActive(), "curve has not started during the lookahead");
+    }
+    check (biggestStep < 0.03f, "lookahead glide has no jumps");
+    check (near (previous, c.evaluate (0.0f), 0.02), "glide ends at the start of the curve");
+    shot.next (c);
+    check (shot.isActive(), "curve starts right after the lookahead");
+}
+
+void delayTests()
+{
+    psyduck::DelayLine d;
+    d.prepare (64);
+
+    bool ok = true;
+    for (int n = 0; n < 500; ++n)
+    {
+        const float out = d.process ((float) n, 10);
+        ok = ok && near (out, n < 10 ? 0.0 : (double) (n - 10));
+    }
+    check (ok, "delay line delays by the requested number of samples");
+
+    psyduck::DelayLine zero;
+    zero.prepare (64);
+    check (near (zero.process (0.7f, 0), 0.7), "zero delay passes the signal through");
+}
 } // namespace
 
 int main()
@@ -171,6 +264,9 @@ int main()
     editTests();
     syncTests();
     gainTests();
+    triggerTests();
+    oneShotTests();
+    delayTests();
 
     if (failures == 0)
         std::printf ("All DSP tests passed.\n");

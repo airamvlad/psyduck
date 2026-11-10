@@ -66,6 +66,9 @@ public:
 
     double getPhase() const noexcept { return phase; }
 
+    /** How far the phase moves per sample. */
+    double getIncrement() const noexcept { return increment; }
+
 private:
     static double wrap (double v) noexcept { return v - std::floor (v); }
 

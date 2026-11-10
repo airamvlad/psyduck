@@ -4,7 +4,17 @@ Sidechain / volume shaper VST3 plugin za psytrance produkciju u Bitwig Studiju (
 
 ## Stanje
 
-Korak 2 (volume shaper): kriva se menja mišem, ima fabričke presete i čuva se sa projektom. Parametri su **Rate**, **Amount**, **Mix** i **Phase**. MIDI i audio okidanje dolaze u narednom koraku.
+Plugin ima tri režima (meni **Mode** gore desno):
+
+- **Sync**: kriva se ponavlja u ritmu tempa (Rate), kao LFO Tool.
+- **Audio trigger**: kick doveden na sidechain ulaz pokreće krivu jednom po udarcu. **Threshold** određuje koliko glasan kick mora biti (narandžasta linija na prikazu), a **Retrigger** je najkraći razmak između dva okidanja.
+- **MIDI trigger**: svaka MIDI nota pokreće krivu.
+
+U Audio i MIDI režimu **Rate** određuje koliko traje jedan prolaz kroz krivu. **Lookahead** kasni zvuk za nekoliko milisekundi (host to sam kompenzuje) da bi se bas spustio pre nego što kick stigne, bez klika.
+
+Ispod krive se vide **kick** (sidechain, narandžasto) i **bas** (izlaz, plavo) raspoređeni po ciklusu, pa se vidi gde se preklapaju.
+
+U Bitwigu: sidechain izvor se bira u panelu uređaja (VST3 sidechain ulaz), a za MIDI režim note dovedi na kanal sa pluginom, na primer preko Note Receiver uređaja.
 
 Rad sa krivom:
 
@@ -43,7 +53,7 @@ Plugin se nalazi u `build/PsyDuck_artefacts/Release/VST3/`. Sa `-DPSYDUCK_COPY_A
 
 ## Struktura
 
-- `src/dsp/` je DSP jezgro bez JUCE-a (kriva, sinhronizacija s tempom, gain), pokriveno testovima u `tests/`.
+- `src/dsp/` je DSP jezgro bez JUCE-a (kriva, sinhronizacija s tempom, gain), pokriveno testovima u `tests/`. `tests/PluginTests.cpp` dodatno pokreće ceo plugin bez DAW-a (režimi, lookahead, čuvanje stanja).
 - `src/plugin/` je JUCE omotač: parametri, procesor i interfejs.
 
 ## Licenca JUCE-a

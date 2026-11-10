@@ -71,11 +71,13 @@ private:
 
     CurveEditor curveEditor;
     juce::ComboBox presetBox;
+    juce::ComboBox modeBox;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> modeAttachment;
     juce::Label hint;
     juce::ComboBox rateBox;
     juce::Label rateLabel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> rateAttachment;
-    Knob amount, mix, phase;
+    Knob amount, mix, phase, threshold, retrigger, lookahead;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PsyDuckAudioProcessorEditor)
 };

@@ -3,12 +3,18 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include "dsp/Curve.h"
+#include "dsp/DelayLine.h"
 #include "dsp/GainProcessor.h"
+#include "dsp/OneShot.h"
+#include "dsp/Scope.h"
 #include "dsp/SyncEngine.h"
+#include "dsp/TriggerDetector.h"
 
+#include <array>
 #include <atomic>
 
-class PsyDuckAudioProcessor final : public juce::AudioProcessor
+class PsyDuckAudioProcessor final : public juce::AudioProcessor,
+                                    private juce::Timer
 {
 public:
     PsyDuckAudioProcessor();
@@ -24,7 +30,7 @@ public:
     bool hasEditor() const override { return true; }
 
     const juce::String getName() const override { return JucePlugin_Name; }
-    bool acceptsMidi() const override { return false; }
+    bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
@@ -52,7 +58,11 @@ public:
     /** Goes up every time the curve changes, so the UI knows when to refresh. */
     int getCurveVersion() const noexcept { return curveVersion.load (std::memory_order_relaxed); }
 
-    /** Position in the cycle (0..1) at the end of the last block, for the UI playhead. */
+    /** Kick and bass levels along the cycle, for drawing under the curve. */
+    const psyduck::Scope& getScope() const noexcept { return scope; }
+
+    /** Position in the cycle (0..1) at the end of the last block, for the UI playhead.
+        Negative while a trigger mode is waiting for the next hit. */
     float getDisplayPhase() const noexcept { return displayPhase.load (std::memory_order_relaxed); }
 
 private:
@@ -65,13 +75,26 @@ private:
     std::atomic<bool> curveDirty { false };
     std::atomic<int> curveVersion { 0 };
 
+    void timerCallback() override;
+    int lookaheadSamplesFor (double sampleRate) const noexcept;
+
     psyduck::SyncEngine sync;
     psyduck::GainProcessor gain;
+    psyduck::OneShot oneShot;
+    psyduck::TriggerDetector detector;
+    psyduck::Scope scope;
+    std::array<psyduck::DelayLine, 2> mainDelay;
+    psyduck::DelayLine sidechainDelay;
+    int lastMode = 0;
 
     std::atomic<float>* rateParam = nullptr;
     std::atomic<float>* amountParam = nullptr;
     std::atomic<float>* mixParam = nullptr;
     std::atomic<float>* phaseParam = nullptr;
+    std::atomic<float>* modeParam = nullptr;
+    std::atomic<float>* thresholdParam = nullptr;
+    std::atomic<float>* retriggerParam = nullptr;
+    std::atomic<float>* lookaheadParam = nullptr;
 
     std::atomic<float> displayPhase { 0.0f };
 
