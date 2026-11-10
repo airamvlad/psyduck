@@ -28,23 +28,26 @@ public:
 
     Curve() { setToDefaultDuck(); }
 
-    /** Classic kick duck: silent while the kick hits, then the bass swells back. */
+    /** Classic kick duck: silent while the kick hits, then the bass swells back.
+        The short fall at the very end avoids a hard cut (click) when the cycle restarts. */
     void setToDefaultDuck() noexcept
     {
         numPoints = 0;
         addPoint ({ 0.00f, 0.0f, 0.0f });
-        addPoint ({ 0.06f, 0.0f, 0.35f });
-        addPoint ({ 0.55f, 1.0f, 0.0f });
-        addPoint ({ 1.00f, 1.0f, 0.0f });
+        addPoint ({ 0.08f, 0.0f, 0.35f });
+        addPoint ({ 0.60f, 1.0f, 0.0f });
+        addPoint ({ 0.96f, 1.0f, 0.0f });
+        addPoint ({ 1.00f, 0.0f, 0.0f });
     }
 
     void clear() noexcept { numPoints = 0; }
 
-    /** Adds a point and keeps the points sorted by x. Returns false when full. */
-    bool addPoint (CurvePoint p) noexcept
+    /** Adds a point and keeps the points sorted by x.
+        Returns the index of the new point, or -1 when the curve is full. */
+    int addPoint (CurvePoint p) noexcept
     {
         if (numPoints >= maxPoints)
-            return false;
+            return -1;
 
         p.x = std::clamp (p.x, 0.0f, 1.0f);
         p.y = std::clamp (p.y, 0.0f, 1.0f);
@@ -58,7 +61,44 @@ public:
         }
         points[i] = p;
         ++numPoints;
+        return static_cast<int> (i);
+    }
+
+    /** Removes a point. The first and last points always stay. */
+    bool removePoint (std::size_t i) noexcept
+    {
+        if (i == 0 || i + 1 >= numPoints)
+            return false;
+
+        for (std::size_t k = i; k + 1 < numPoints; ++k)
+            points[k] = points[k + 1];
+        --numPoints;
         return true;
+    }
+
+    /** Moves a point. It cannot pass its neighbours, and the first and last
+        points stay at the edges of the cycle. */
+    void movePoint (std::size_t i, float x, float y) noexcept
+    {
+        if (i >= numPoints)
+            return;
+
+        if (i == 0)
+            x = points[0].x;
+        else if (i + 1 == numPoints)
+            x = points[i].x;
+        else
+            x = std::clamp (x, points[i - 1].x, points[i + 1].x);
+
+        points[i].x = x;
+        points[i].y = std::clamp (y, 0.0f, 1.0f);
+    }
+
+    /** Sets the bend (-1..1) of the segment that starts at point i. */
+    void setSegmentCurve (std::size_t i, float curve) noexcept
+    {
+        if (i < numPoints)
+            points[i].curve = std::clamp (curve, -1.0f, 1.0f);
     }
 
     std::size_t size() const noexcept { return numPoints; }

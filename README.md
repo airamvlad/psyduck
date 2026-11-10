@@ -4,7 +4,13 @@ Sidechain / volume shaper VST3 plugin za psytrance produkciju u Bitwig Studiju (
 
 ## Stanje
 
-Korak 1 (osnova): plugin se builda kao VST3, ima parametre **Rate**, **Amount**, **Mix** i **Phase**, čuva stanje sa projektom i već utišava signal po ugrađenoj krivi sinhronizovano sa tempom. Crtanje krive, preseti, MIDI i audio okidanje dolaze u narednim koracima.
+Korak 2 (volume shaper): kriva se menja mišem, ima fabričke presete i čuva se sa projektom. Parametri su **Rate**, **Amount**, **Mix** i **Phase**. MIDI i audio okidanje dolaze u narednom koraku.
+
+Rad sa krivom:
+
+- vuci tačku da je pomeriš (prva i poslednja idu samo gore-dole)
+- dupli klik na prazno mesto dodaje tačku, dupli klik na tačku je briše
+- vuci mali prsten na sredini segmenta gore-dole da ga saviješ, dupli klik ga ispravlja
 
 ## Gotov build (bez instaliranja alata)
 

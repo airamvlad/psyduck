@@ -1,5 +1,6 @@
 #include "dsp/Curve.h"
 #include "dsp/GainProcessor.h"
+#include "dsp/Presets.h"
 #include "dsp/SyncEngine.h"
 
 #include <cmath>
@@ -27,16 +28,18 @@ void curveTests()
     check (near (c.evaluate (0.03f), 0.0), "default curve holds silence over the kick");
     check (near (c.evaluate (0.8f), 1.0), "default curve is back at full level");
 
+    check (near (c.evaluate (1.0f), 0.0), "default curve falls before the cycle restarts");
+
     float previous = 0.0f;
     bool monotonic = true, inRange = true;
-    for (int i = 0; i <= 1000; ++i)
+    for (int i = 0; i <= 950; ++i)
     {
         const float v = c.evaluate ((float) i / 1000.0f);
         monotonic = monotonic && v >= previous - 1.0e-6f;
         inRange = inRange && v >= 0.0f && v <= 1.0f;
         previous = v;
     }
-    check (monotonic, "default curve only rises");
+    check (monotonic, "default curve only rises until the final fall");
     check (inRange, "curve stays within 0..1");
 
     psyduck::Curve line;
@@ -49,9 +52,45 @@ void curveTests()
     full.clear();
     bool added = true;
     for (std::size_t i = 0; i < psyduck::Curve::maxPoints; ++i)
-        added = added && full.addPoint ({ (float) i / 32.0f, 1.0f, 0.0f });
+        added = added && full.addPoint ({ (float) i / 32.0f, 1.0f, 0.0f }) >= 0;
     check (added, "curve accepts maxPoints points");
-    check (! full.addPoint ({ 0.5f, 0.5f, 0.0f }), "curve rejects points beyond its capacity");
+    check (full.addPoint ({ 0.5f, 0.5f, 0.0f }) == -1, "curve rejects points beyond its capacity");
+}
+
+void editTests()
+{
+    psyduck::Curve c;
+    c.clear();
+    c.addPoint ({ 0.0f, 0.0f, 0.0f });
+    c.addPoint ({ 1.0f, 1.0f, 0.0f });
+
+    const int index = c.addPoint ({ 0.5f, 0.2f, 0.0f });
+    check (index == 1 && c.size() == 3, "new point lands between its neighbours");
+
+    c.movePoint (1, 2.0f, 0.9f);
+    check (near (c[1].x, 1.0) && near (c[1].y, 0.9), "a point cannot pass the next point");
+
+    c.movePoint (0, 0.4f, 0.5f);
+    check (near (c[0].x, 0.0) && near (c[0].y, 0.5), "first point only moves up and down");
+    c.movePoint (2, 0.4f, 0.5f);
+    check (near (c[2].x, 1.0), "last point only moves up and down");
+
+    check (! c.removePoint (0) && ! c.removePoint (2), "end points cannot be removed");
+    check (c.removePoint (1) && c.size() == 2, "inner points can be removed");
+
+    c.movePoint (0, 0.0f, 0.0f);
+    c.movePoint (1, 1.0f, 1.0f);
+    c.setSegmentCurve (0, 1.0f);
+    check (c.evaluate (0.5f) > 0.8f, "positive bend rises fast");
+    c.setSegmentCurve (0, -1.0f);
+    check (c.evaluate (0.5f) < 0.2f, "negative bend rises late");
+
+    for (int i = 0; i < psyduck::numPresets; ++i)
+    {
+        const auto preset = psyduck::makePreset (i);
+        bool ok = preset.size() >= 2 && near (preset[0].x, 0.0) && near (preset[preset.size() - 1].x, 1.0);
+        check (ok, "every preset spans the whole cycle");
+    }
 }
 
 void syncTests()
@@ -129,6 +168,7 @@ void gainTests()
 int main()
 {
     curveTests();
+    editTests();
     syncTests();
     gainTests();
 

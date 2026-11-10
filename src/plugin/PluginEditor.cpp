@@ -1,6 +1,7 @@
 #include "PluginEditor.h"
 
 #include "Parameters.h"
+#include "dsp/Presets.h"
 
 namespace
 {
@@ -9,21 +10,186 @@ const juce::Colour panel { 0xff1d2029 };
 const juce::Colour grid { 0xff2c313d };
 const juce::Colour accent { 0xff7dffb0 };
 const juce::Colour text { 0xffd7dbe6 };
+
+constexpr float pointRadius = 6.0f;
+constexpr float bendRadius = 4.0f;
+constexpr float grabRadius = 11.0f;
 } // namespace
 
-CurveDisplay::CurveDisplay (PsyDuckAudioProcessor& p) : processor (p)
+//==============================================================================
+CurveEditor::CurveEditor (PsyDuckAudioProcessor& p) : processor (p)
 {
+    curve = processor.getCurve();
+    seenVersion = processor.getCurveVersion();
     startTimerHz (30);
 }
 
-void CurveDisplay::paint (juce::Graphics& g)
+void CurveEditor::timerCallback()
 {
-    const auto area = getLocalBounds().toFloat();
+    const int version = processor.getCurveVersion();
 
+    if (version != seenVersion && drag.target == Target::none)
+    {
+        curve = processor.getCurve();
+        seenVersion = version;
+    }
+
+    repaint();
+}
+
+juce::Rectangle<float> CurveEditor::plotArea() const
+{
+    return getLocalBounds().toFloat().reduced (12.0f);
+}
+
+juce::Point<float> CurveEditor::toScreen (float x, float y) const
+{
+    const auto plot = plotArea();
+    return { plot.getX() + plot.getWidth() * x, plot.getBottom() - plot.getHeight() * y };
+}
+
+bool CurveEditor::hasBendHandle (std::size_t segment) const
+{
+    if (segment + 1 >= curve.size())
+        return false;
+
+    const auto a = toScreen (curve[segment].x, curve[segment].y);
+    const auto b = toScreen (curve[segment + 1].x, curve[segment + 1].y);
+
+    // A flat or very short segment has nothing to bend.
+    return (b.x - a.x) > 30.0f && std::abs (b.y - a.y) > 8.0f;
+}
+
+juce::Point<float> CurveEditor::bendHandle (std::size_t segment) const
+{
+    const float midX = 0.5f * (curve[segment].x + curve[segment + 1].x);
+    return toScreen (midX, curve.evaluate (midX));
+}
+
+CurveEditor::Hit CurveEditor::hitTest (juce::Point<float> pos) const
+{
+    Hit best;
+    float bestDistance = grabRadius;
+
+    for (std::size_t i = 0; i < curve.size(); ++i)
+    {
+        const float d = pos.getDistanceFrom (toScreen (curve[i].x, curve[i].y));
+        if (d < bestDistance)
+        {
+            bestDistance = d;
+            best = { Target::point, i };
+        }
+    }
+
+    if (best.target == Target::point)
+        return best;
+
+    for (std::size_t i = 0; i + 1 < curve.size(); ++i)
+    {
+        if (! hasBendHandle (i))
+            continue;
+
+        const float d = pos.getDistanceFrom (bendHandle (i));
+        if (d < bestDistance)
+        {
+            bestDistance = d;
+            best = { Target::bend, i };
+        }
+    }
+
+    return best;
+}
+
+void CurveEditor::pushCurve()
+{
+    processor.setCurve (curve);
+    seenVersion = processor.getCurveVersion();
+    edited = true;
+    repaint();
+}
+
+void CurveEditor::mouseMove (const juce::MouseEvent& e)
+{
+    const auto hit = hitTest (e.position);
+    setMouseCursor (hit.target == Target::none ? juce::MouseCursor::NormalCursor
+                                               : hit.target == Target::bend ? juce::MouseCursor::UpDownResizeCursor
+                                                                            : juce::MouseCursor::DraggingHandCursor);
+}
+
+void CurveEditor::mouseDown (const juce::MouseEvent& e)
+{
+    drag = hitTest (e.position);
+    edited = false;
+
+    if (drag.target == Target::bend)
+        bendAtDragStart = curve[drag.index].curve;
+}
+
+void CurveEditor::mouseDrag (const juce::MouseEvent& e)
+{
+    const auto plot = plotArea();
+
+    if (drag.target == Target::point)
+    {
+        const float x = (e.position.x - plot.getX()) / plot.getWidth();
+        const float y = (plot.getBottom() - e.position.y) / plot.getHeight();
+        curve.movePoint (drag.index, juce::jlimit (0.0f, 1.0f, x), juce::jlimit (0.0f, 1.0f, y));
+        pushCurve();
+    }
+    else if (drag.target == Target::bend)
+    {
+        // Dragging up always lifts the middle of the segment, whichever way it slopes.
+        const float rising = curve[drag.index + 1].y >= curve[drag.index].y ? 1.0f : -1.0f;
+        const float dragUp = (float) -e.getDistanceFromDragStartY() / 90.0f;
+        curve.setSegmentCurve (drag.index, bendAtDragStart + rising * dragUp);
+        pushCurve();
+    }
+}
+
+void CurveEditor::mouseUp (const juce::MouseEvent&)
+{
+    drag = {};
+
+    if (edited)
+        processor.curveEditFinished();
+
+    edited = false;
+}
+
+void CurveEditor::mouseDoubleClick (const juce::MouseEvent& e)
+{
+    const auto hit = hitTest (e.position);
+
+    if (hit.target == Target::point)
+    {
+        if (! curve.removePoint (hit.index))
+            return;
+    }
+    else if (hit.target == Target::bend)
+    {
+        curve.setSegmentCurve (hit.index, 0.0f);
+    }
+    else
+    {
+        const auto plot = plotArea();
+        const float x = juce::jlimit (0.0f, 1.0f, (e.position.x - plot.getX()) / plot.getWidth());
+        const float y = juce::jlimit (0.0f, 1.0f, (plot.getBottom() - e.position.y) / plot.getHeight());
+
+        if (curve.addPoint ({ x, y, 0.0f }) < 0)
+            return;
+    }
+
+    pushCurve();
+    processor.curveEditFinished();
+    edited = false;
+}
+
+void CurveEditor::paint (juce::Graphics& g)
+{
     g.setColour (panel);
-    g.fillRoundedRectangle (area, 6.0f);
+    g.fillRoundedRectangle (getLocalBounds().toFloat(), 6.0f);
 
-    const auto plot = area.reduced (10.0f);
+    const auto plot = plotArea();
 
     g.setColour (grid);
     for (int i = 0; i <= 4; ++i)
@@ -34,20 +200,18 @@ void CurveDisplay::paint (juce::Graphics& g)
         g.drawHorizontalLine (juce::roundToInt (y), plot.getX(), plot.getRight());
     }
 
-    const auto& curve = processor.getCurve();
     const int steps = juce::jmax (2, juce::roundToInt (plot.getWidth()));
 
     juce::Path line;
     for (int i = 0; i <= steps; ++i)
     {
         const float t = (float) i / (float) steps;
-        const float x = plot.getX() + plot.getWidth() * t;
-        const float y = plot.getBottom() - plot.getHeight() * curve.evaluate (t);
+        const auto p = toScreen (t, curve.evaluate (t));
 
         if (i == 0)
-            line.startNewSubPath (x, y);
+            line.startNewSubPath (p);
         else
-            line.lineTo (x, y);
+            line.lineTo (p);
     }
 
     juce::Path fill (line);
@@ -61,14 +225,58 @@ void CurveDisplay::paint (juce::Graphics& g)
     g.strokePath (line, juce::PathStrokeType (2.0f));
 
     const float playheadX = plot.getX() + plot.getWidth() * processor.getDisplayPhase();
-    g.setColour (text.withAlpha (0.7f));
+    g.setColour (text.withAlpha (0.6f));
     g.drawVerticalLine (juce::roundToInt (playheadX), plot.getY(), plot.getBottom());
+
+    for (std::size_t i = 0; i + 1 < curve.size(); ++i)
+    {
+        if (! hasBendHandle (i))
+            continue;
+
+        const auto p = bendHandle (i);
+        g.setColour (background);
+        g.fillEllipse (juce::Rectangle<float> (bendRadius * 2.0f, bendRadius * 2.0f).withCentre (p));
+        g.setColour (accent.withAlpha (0.8f));
+        g.drawEllipse (juce::Rectangle<float> (bendRadius * 2.0f, bendRadius * 2.0f).withCentre (p), 1.5f);
+    }
+
+    for (std::size_t i = 0; i < curve.size(); ++i)
+    {
+        const auto p = toScreen (curve[i].x, curve[i].y);
+        g.setColour (accent);
+        g.fillEllipse (juce::Rectangle<float> (pointRadius * 2.0f, pointRadius * 2.0f).withCentre (p));
+        g.setColour (background);
+        g.drawEllipse (juce::Rectangle<float> (pointRadius * 2.0f, pointRadius * 2.0f).withCentre (p), 1.5f);
+    }
 }
 
+//==============================================================================
 PsyDuckAudioProcessorEditor::PsyDuckAudioProcessorEditor (PsyDuckAudioProcessor& p)
-    : AudioProcessorEditor (&p), processor (p), curveDisplay (p)
+    : AudioProcessorEditor (&p), processor (p), curveEditor (p)
 {
-    addAndMakeVisible (curveDisplay);
+    addAndMakeVisible (curveEditor);
+
+    for (int i = 0; i < psyduck::numPresets; ++i)
+        presetBox.addItem (psyduck::presetNames[(size_t) i], i + 1);
+
+    presetBox.setTextWhenNothingSelected ("Presets");
+    presetBox.onChange = [this]
+    {
+        const int id = presetBox.getSelectedId();
+        if (id > 0)
+        {
+            processor.setCurve (psyduck::makePreset (id - 1));
+            processor.curveEditFinished();
+        }
+    };
+    addAndMakeVisible (presetBox);
+
+    hint.setText ("Drag points. Double-click to add or remove a point. Drag the small ring to bend a segment.",
+                  juce::dontSendNotification);
+    hint.setFont (juce::FontOptions (12.0f));
+    hint.setColour (juce::Label::textColourId, text.withAlpha (0.55f));
+    hint.setJustificationType (juce::Justification::centredLeft);
+    addAndMakeVisible (hint);
 
     rateLabel.setText ("Rate", juce::dontSendNotification);
     rateLabel.setJustificationType (juce::Justification::centred);
@@ -86,7 +294,9 @@ PsyDuckAudioProcessorEditor::PsyDuckAudioProcessorEditor (PsyDuckAudioProcessor&
     setupKnob (mix, psyduck::params::mix, "Mix");
     setupKnob (phase, psyduck::params::phase, "Phase");
 
-    setSize (560, 380);
+    setResizable (true, true);
+    setResizeLimits (560, 400, 1400, 900);
+    setSize (720, 480);
 }
 
 void PsyDuckAudioProcessorEditor::setupKnob (Knob& knob, const char* paramId, const juce::String& title)
@@ -113,17 +323,22 @@ void PsyDuckAudioProcessorEditor::paint (juce::Graphics& g)
 
     g.setColour (accent);
     g.setFont (juce::FontOptions (20.0f, juce::Font::bold));
-    g.drawText ("PsyDuck", getLocalBounds().removeFromTop (40).reduced (16, 0), juce::Justification::centredLeft);
+    g.drawText ("PsyDuck", getLocalBounds().removeFromTop (44).reduced (16, 0), juce::Justification::centredLeft);
 }
 
 void PsyDuckAudioProcessorEditor::resized()
 {
     auto area = getLocalBounds().reduced (16);
-    area.removeFromTop (28);
+
+    auto header = area.removeFromTop (28);
+    presetBox.setBounds (header.removeFromRight (190));
+    area.removeFromTop (10);
 
     auto controls = area.removeFromBottom (110);
-    area.removeFromBottom (12);
-    curveDisplay.setBounds (area);
+    area.removeFromBottom (6);
+    hint.setBounds (area.removeFromBottom (18));
+    area.removeFromBottom (4);
+    curveEditor.setBounds (area);
 
     const int column = controls.getWidth() / 4;
 

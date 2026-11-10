@@ -40,14 +40,31 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
 
-    /** The curve currently in use. Fixed for now, editable from the next milestone. */
-    const psyduck::Curve& getCurve() const noexcept { return curve; }
+    /** Copy of the current curve. Safe to call from any thread except the audio thread. */
+    psyduck::Curve getCurve() const;
+
+    /** Replaces the curve. Safe to call from any thread except the audio thread. */
+    void setCurve (const psyduck::Curve&);
+
+    /** Tells the host the project changed. Call when the user finishes an edit. */
+    void curveEditFinished();
+
+    /** Goes up every time the curve changes, so the UI knows when to refresh. */
+    int getCurveVersion() const noexcept { return curveVersion.load (std::memory_order_relaxed); }
 
     /** Position in the cycle (0..1) at the end of the last block, for the UI playhead. */
     float getDisplayPhase() const noexcept { return displayPhase.load (std::memory_order_relaxed); }
 
 private:
-    psyduck::Curve curve;
+    static juce::String curveToString (const psyduck::Curve&);
+    static bool curveFromString (const juce::String&, psyduck::Curve&);
+
+    psyduck::Curve audioCurve;          // audio thread only
+    psyduck::Curve sharedCurve;         // guarded by curveLock
+    mutable juce::SpinLock curveLock;
+    std::atomic<bool> curveDirty { false };
+    std::atomic<int> curveVersion { 0 };
+
     psyduck::SyncEngine sync;
     psyduck::GainProcessor gain;
 
