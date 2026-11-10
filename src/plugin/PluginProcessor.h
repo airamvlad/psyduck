@@ -3,15 +3,19 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include "dsp/Curve.h"
+#include "dsp/Crossover.h"
 #include "dsp/DelayLine.h"
+#include "dsp/EnvelopeFollower.h"
 #include "dsp/GainProcessor.h"
 #include "dsp/OneShot.h"
+#include "dsp/PhaseMeter.h"
 #include "dsp/Scope.h"
 #include "dsp/SyncEngine.h"
 #include "dsp/TriggerDetector.h"
 
 #include <array>
 #include <atomic>
+#include <vector>
 
 class PsyDuckAudioProcessor final : public juce::AudioProcessor,
                                     private juce::Timer
@@ -58,6 +62,24 @@ public:
     /** Goes up every time the curve changes, so the UI knows when to refresh. */
     int getCurveVersion() const noexcept { return curveVersion.load (std::memory_order_relaxed); }
 
+    /** Call before changing the curve so the change can be undone. Message thread only. */
+    void beginCurveEdit();
+    bool canUndo() const noexcept { return ! undoStack.empty(); }
+    bool canRedo() const noexcept { return ! redoStack.empty(); }
+    void undoCurve();
+    void redoCurve();
+
+    static juce::String curveToString (const psyduck::Curve&);
+    static bool curveFromString (const juce::String&, psyduck::Curve&);
+
+    /** Whether points snap to the grid while dragging. Saved with the project. */
+    std::atomic<bool> snapToGrid { true };
+
+    /** How the low end of kick and bass line up: +1 adds up, -1 cancels.
+        Only meaningful while hasPhaseReading() is true. */
+    float getPhaseCorrelation() const noexcept { return phaseCorrelation.load (std::memory_order_relaxed); }
+    bool hasPhaseReading() const noexcept { return phaseValid.load (std::memory_order_relaxed); }
+
     /** Kick and bass levels along the cycle, for drawing under the curve. */
     const psyduck::Scope& getScope() const noexcept { return scope; }
 
@@ -66,9 +88,6 @@ public:
     float getDisplayPhase() const noexcept { return displayPhase.load (std::memory_order_relaxed); }
 
 private:
-    static juce::String curveToString (const psyduck::Curve&);
-    static bool curveFromString (const juce::String&, psyduck::Curve&);
-
     psyduck::Curve audioCurve;          // audio thread only
     psyduck::Curve sharedCurve;         // guarded by curveLock
     mutable juce::SpinLock curveLock;
@@ -85,7 +104,17 @@ private:
     psyduck::Scope scope;
     std::array<psyduck::DelayLine, 2> mainDelay;
     psyduck::DelayLine sidechainDelay;
+    psyduck::EnvelopeFollower follower;
+    psyduck::PhaseMeter phaseMeter;
+    std::array<psyduck::BandSplit, 2> bandSplit;
+    float lastCrossover = 0.0f;
+    bool lastMultiband = false;
     int lastMode = 0;
+
+    std::atomic<float> phaseCorrelation { 0.0f };
+    std::atomic<bool> phaseValid { false };
+
+    std::vector<psyduck::Curve> undoStack, redoStack;   // message thread only
 
     std::atomic<float>* rateParam = nullptr;
     std::atomic<float>* amountParam = nullptr;
@@ -95,6 +124,11 @@ private:
     std::atomic<float>* thresholdParam = nullptr;
     std::atomic<float>* retriggerParam = nullptr;
     std::atomic<float>* lookaheadParam = nullptr;
+    std::atomic<float>* midiNoteParam = nullptr;
+    std::atomic<float>* multibandParam = nullptr;
+    std::atomic<float>* crossoverParam = nullptr;
+    std::atomic<float>* invertParam = nullptr;
+    std::atomic<float>* releaseParam = nullptr;
 
     std::atomic<float> displayPhase { 0.0f };
 

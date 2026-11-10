@@ -4,15 +4,26 @@ Sidechain / volume shaper VST3 plugin za psytrance produkciju u Bitwig Studiju (
 
 ## Stanje
 
-Plugin ima tri režima (meni **Mode** gore desno):
+Plugin ima četiri režima (meni **Mode** gore desno):
 
 - **Sync**: kriva se ponavlja u ritmu tempa (Rate), kao LFO Tool.
 - **Audio trigger**: kick doveden na sidechain ulaz pokreće krivu jednom po udarcu. **Threshold** određuje koliko glasan kick mora biti (narandžasta linija na prikazu), a **Retrigger** je najkraći razmak između dva okidanja.
-- **MIDI trigger**: svaka MIDI nota pokreće krivu.
+- **MIDI trigger**: MIDI nota pokreće krivu. U polju **Note** biraš da li važi svaka nota ili samo jedna.
+- **Follower**: bas prati glasnoću samog kicka, kao klasičan sidechain kompresor. Kick na nivou **Threshold** potpuno utišava bas, a **Release** određuje koliko brzo se bas vraća. Kriva se u ovom režimu ne koristi.
+
+Dugmad koja u izabranom režimu ne rade ništa su zasivljena.
 
 U Audio i MIDI režimu **Rate** određuje koliko traje jedan prolaz kroz krivu. **Lookahead** kasni zvuk za nekoliko milisekundi (host to sam kompenzuje) da bi se bas spustio pre nego što kick stigne, bez klika.
 
 Ispod krive se vide **kick** (sidechain, narandžasto) i **bas** (izlaz, plavo) raspoređeni po ciklusu, pa se vidi gde se preklapaju.
+
+Ostalo:
+
+- **Multiband**: utišava se samo deo basa ispod frekvencije **Crossover**, a sve iznad prolazi netaknuto.
+- **Kick / Bass phase**: pokazuje da li se niske frekvencije kicka i basa sabiraju ("in phase") ili poništavaju ("cancelling"). Ako se poništavaju, probaj **Invert**. Meri se bas pre utišavanja, dok kick i bas sviraju zajedno.
+- **Suggest**: iz kicka koji se vidi ispod krive sam napravi početnu krivu.
+- **Presets**: fabrički preseti, tvoji preseti i "Save current curve...". Tvoji preseti su fajlovi `.psycurve` u folderu koji otvara "Open preset folder".
+- **Undo / Redo** za izmene krive i **Snap** za lepljenje tačaka na mrežu (Shift privremeno obrće Snap).
 
 U Bitwigu: sidechain izvor se bira u panelu uređaja (VST3 sidechain ulaz), a za MIDI režim note dovedi na kanal sa pluginom, na primer preko Note Receiver uređaja.
 
@@ -53,7 +64,7 @@ Plugin se nalazi u `build/PsyDuck_artefacts/Release/VST3/`. Sa `-DPSYDUCK_COPY_A
 
 ## Struktura
 
-- `src/dsp/` je DSP jezgro bez JUCE-a (kriva, sinhronizacija s tempom, gain), pokriveno testovima u `tests/`. `tests/PluginTests.cpp` dodatno pokreće ceo plugin bez DAW-a (režimi, lookahead, čuvanje stanja).
+- `src/dsp/` je DSP jezgro bez JUCE-a (kriva, sinhronizacija s tempom, gain), pokriveno testovima u `tests/`. `tests/PluginTests.cpp` dodatno pokreće ceo plugin bez DAW-a (režimi, lookahead, multiband, čuvanje stanja). Sa `psyduck_plugin_tests --screenshot slika.png` crta interfejs u PNG.
 - `src/plugin/` je JUCE omotač: parametri, procesor i interfejs.
 
 ## Licenca JUCE-a

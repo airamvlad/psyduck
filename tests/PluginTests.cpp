@@ -1,6 +1,7 @@
 // End-to-end checks of the plugin processor, without a DAW.
 
 #include "plugin/Parameters.h"
+#include "plugin/PluginEditor.h"
 #include "plugin/PluginProcessor.h"
 #include "dsp/Presets.h"
 
@@ -36,7 +37,8 @@ void setValue (PsyDuckAudioProcessor& p, const char* id, float value)
 
 /** Runs the processor with a constant 1.0 on the main input and returns the left output.
     kickAt / noteAt: sample positions of a sidechain burst or a MIDI note (-1 for none). */
-std::vector<float> run (PsyDuckAudioProcessor& p, int totalSamples, int kickAt, int noteAt)
+std::vector<float> run (PsyDuckAudioProcessor& p, int totalSamples, int kickAt, int noteAt,
+                        int noteNumber = 36, bool sineInput = false)
 {
     std::vector<float> out;
     out.reserve ((size_t) totalSamples);
@@ -50,8 +52,9 @@ std::vector<float> run (PsyDuckAudioProcessor& p, int totalSamples, int kickAt, 
         for (int i = 0; i < blockSize; ++i)
         {
             const int n = start + i;
-            buffer.setSample (0, i, 1.0f);
-            buffer.setSample (1, i, 1.0f);
+            const float in = sineInput ? std::sin (0.6545f * (float) n) : 1.0f;   // 5 kHz
+            buffer.setSample (0, i, in);
+            buffer.setSample (1, i, in);
 
             const bool inKick = kickAt >= 0 && n >= kickAt && n < kickAt + 2400;
             const float kick = inKick ? 0.9f * std::sin (0.0065f * (float) (n - kickAt) + 1.0f) : 0.0f;
@@ -59,7 +62,7 @@ std::vector<float> run (PsyDuckAudioProcessor& p, int totalSamples, int kickAt, 
             buffer.setSample (3, i, kick);
 
             if (n == noteAt)
-                midi.addEvent (juce::MidiMessage::noteOn (1, 36, 1.0f), i);
+                midi.addEvent (juce::MidiMessage::noteOn (1, noteNumber, 1.0f), i);
         }
 
         p.processBlock (buffer, midi);
@@ -144,6 +147,55 @@ void midiMode()
     check (minOf (out, 60000, 72000) > 0.99f, "midi mode ignores the sidechain audio");
 }
 
+void noteFilter()
+{
+    auto p = make();
+    setChoice (*p, psyduck::params::mode, psyduck::params::modeMidi);
+    setValue (*p, psyduck::params::midiNote, 37.0f);   // listens to MIDI note 36 only
+
+    const auto wrong = run (*p, 48000, -1, 24000, 40);
+    check (minOf (wrong, 2000, 48000) > 0.99f, "other notes are ignored when a note is chosen");
+
+    const auto right = run (*p, 48000, -1, 24000, 36);
+    check (right[(size_t) (24000 + 240)] < 0.05f, "the chosen note triggers");
+}
+
+void multibandAndInvert()
+{
+    auto p = make();
+    setValue (*p, psyduck::params::multiband, 1.0f);
+
+    // Constant input is pure low end: ducked as before.
+    const auto low = run (*p, 48000, -1, -1);
+    check (minOf (low, 4000, 48000) < 0.02f, "multiband still ducks the low end");
+
+    // A 5 kHz tone is above the crossover: left alone.
+    const auto high = run (*p, 48000, -1, -1, 36, true);
+    bool untouched = true;
+    for (int start = 4800; start + 480 <= 48000; start += 480)
+        untouched = untouched && maxOf (high, start, start + 480) > 0.95f;
+    check (untouched, "multiband leaves the highs untouched");
+
+    auto q = make();
+    setValue (*q, psyduck::params::amount, 0.0f);
+    setValue (*q, psyduck::params::invert, 1.0f);
+    const auto flipped = run (*q, 9600, -1, -1);
+    check (flipped[9000] < -0.99f, "invert flips the polarity");
+}
+
+void followerMode()
+{
+    auto p = make();
+    setChoice (*p, psyduck::params::mode, psyduck::params::modeFollower);
+
+    const int kickAt = 24000;
+    const auto out = run (*p, 96000, kickAt, -1);
+
+    check (minOf (out, 2000, kickAt) > 0.99f, "follower does not duck without a kick");
+    check (minOf (out, kickAt, kickAt + 2400) < 0.02f, "follower ducks while the kick plays");
+    check (minOf (out, 80000, 96000) > 0.99f, "follower recovers after the kick");
+}
+
 void state()
 {
     auto a = make();
@@ -162,13 +214,37 @@ void state()
 }
 } // namespace
 
-int main()
+/** Renders the editor to a PNG so the layout can be checked without a DAW. */
+int screenshot (const juce::String& path, int mode)
+{
+    auto p = make();
+    setChoice (*p, psyduck::params::mode, mode);
+    run (*p, 48000, 0, -1);
+
+    std::unique_ptr<juce::AudioProcessorEditor> editor (p->createEditor());
+
+    const auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 2.0f);
+    juce::File file (path);
+    file.deleteFile();
+    juce::FileOutputStream stream (file);
+    juce::PNGImageFormat png;
+    return stream.openedOk() && png.writeImageToStream (image, stream) ? 0 : 1;
+}
+
+int main (int argc, char** argv)
 {
     const juce::ScopedJuceInitialiser_GUI juce;
+
+    if (argc >= 3 && juce::String (argv[1]) == "--screenshot")
+        return screenshot (juce::File::getCurrentWorkingDirectory().getChildFile (argv[2]).getFullPathName(),
+                           argc >= 4 ? juce::String (argv[3]).getIntValue() : 0);
 
     syncMode();
     audioMode();
     midiMode();
+    noteFilter();
+    multibandAndInvert();
+    followerMode();
     state();
 
     if (failures == 0)

@@ -1,13 +1,18 @@
+#include "dsp/Crossover.h"
 #include "dsp/Curve.h"
+#include "dsp/CurveSuggest.h"
 #include "dsp/DelayLine.h"
+#include "dsp/EnvelopeFollower.h"
 #include "dsp/GainProcessor.h"
 #include "dsp/OneShot.h"
+#include "dsp/PhaseMeter.h"
 #include "dsp/Presets.h"
 #include "dsp/SyncEngine.h"
 #include "dsp/TriggerDetector.h"
 
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 namespace
 {
@@ -256,6 +261,123 @@ void delayTests()
     zero.prepare (64);
     check (near (zero.process (0.7f, 0), 0.7), "zero delay passes the signal through");
 }
+double sineRms (double frequency, bool wantLow, bool wantSum)
+{
+    const double sr = 48000.0;
+    psyduck::BandSplit split;
+    split.setFrequency (150.0, sr);
+
+    double sum = 0.0;
+    int count = 0;
+    for (int n = 0; n < 48000; ++n)
+    {
+        const float x = (float) std::sin (2.0 * 3.14159265358979 * frequency * n / sr);
+        float low = 0.0f, high = 0.0f;
+        split.process (x, low, high);
+        const double v = wantSum ? (double) low + high : (wantLow ? low : high);
+        if (n > 24000)
+        {
+            sum += v * v;
+            ++count;
+        }
+    }
+    return std::sqrt (sum / count);
+}
+
+void crossoverTests()
+{
+    const double full = std::sqrt (0.5);
+    check (near (sineRms (40.0, true, false), full, 0.03), "low band keeps the sub");
+    check (sineRms (2000.0, true, false) < 0.001, "low band removes the highs");
+    check (near (sineRms (2000.0, false, false), full, 0.03), "high band keeps the highs");
+    check (sineRms (30.0, false, false) < 0.02, "high band removes the sub");
+
+    for (double f : { 40.0, 100.0, 150.0, 300.0, 1000.0, 8000.0 })
+        check (near (sineRms (f, false, true), full, 0.02), "bands add back up to the full level");
+}
+
+float correlationOf (double phaseShift)
+{
+    const double sr = 48000.0;
+    psyduck::PhaseMeter meter;
+    meter.prepare (sr);
+    for (int n = 0; n < 48000; ++n)
+    {
+        const double t = 2.0 * 3.14159265358979 * 55.0 * n / sr;
+        meter.process ((float) std::sin (t), (float) std::sin (t + phaseShift));
+    }
+    check (meter.hasSignal(), "phase meter sees the signal");
+    return meter.getCorrelation();
+}
+
+void phaseTests()
+{
+    check (correlationOf (0.0) > 0.98f, "identical low end reads as in phase");
+    check (correlationOf (3.14159265358979) < -0.98f, "inverted low end reads as cancelling");
+    check (std::abs (correlationOf (1.5707963)) < 0.1f, "a quarter-cycle shift reads as neutral");
+
+    psyduck::PhaseMeter silent;
+    silent.prepare (48000.0);
+    for (int n = 0; n < 1000; ++n)
+        silent.process (0.0f, 0.5f);
+    check (! silent.hasSignal(), "phase meter reports nothing without a kick");
+}
+
+void followerTests()
+{
+    const double sr = 48000.0;
+    psyduck::EnvelopeFollower f;
+    f.prepare (sr);
+    f.setRelease (100.0f);
+
+    check (near (f.process (0.0f, 0.5f), 1.0), "follower does not duck in silence");
+
+    float v = 1.0f;
+    for (int n = 0; n < 480; ++n)
+        v = f.process (0.8f, 0.5f);
+    check (v < 0.01f, "a loud kick ducks fully");
+
+    for (int n = 0; n < 4800; ++n)
+        v = f.process (0.0f, 0.5f);
+    check (v > 0.3f && v < 0.6f, "the duck eases off with the release time");
+
+    for (int n = 0; n < 48000; ++n)
+        v = f.process (0.0f, 0.5f);
+    check (v > 0.99f, "follower returns to full level");
+
+    psyduck::EnvelopeFollower half;
+    half.prepare (sr);
+    for (int n = 0; n < 4800; ++n)
+        v = half.process (0.25f, 0.5f);
+    check (near (v, 0.5, 0.02), "a quieter kick ducks less");
+}
+
+void suggestTests()
+{
+    psyduck::Curve c;
+
+    std::vector<float> silence (256, 0.0f);
+    check (! psyduck::suggestCurve (silence, c), "no suggestion without a kick");
+
+    // Kick at the start of the cycle, fading over roughly a third of it.
+    std::vector<float> kick (256, 0.0f);
+    for (int i = 0; i < 256; ++i)
+        kick[(size_t) i] = 0.9f * (float) std::exp (-(double) i / 25.0) * (i % 3 == 0 ? 1.0f : 0.6f);
+
+    check (psyduck::suggestCurve (kick, c), "a kick gives a suggestion");
+    check (near (c.evaluate (0.0f), 0.0) && near (c.evaluate (0.03f), 0.0), "suggestion is silent over the kick body");
+    check (c.evaluate (0.2f) > 0.0f && c.evaluate (0.2f) < 1.0f, "suggestion rises while the tail fades");
+    check (near (c.evaluate (0.6f), 1.0), "suggestion is fully open after the kick");
+
+    // Kick in the middle of the cycle.
+    std::vector<float> late (256, 0.0f);
+    for (int i = 128; i < 256; ++i)
+        late[(size_t) i] = 0.9f * (float) std::exp (-(double) (i - 128) / 15.0);
+
+    check (psyduck::suggestCurve (late, c), "an off-grid kick gives a suggestion");
+    check (near (c.evaluate (0.2f), 1.0), "suggestion stays open before a late kick");
+    check (near (c.evaluate (0.51f), 0.0), "suggestion ducks where the late kick is");
+}
 } // namespace
 
 int main()
@@ -267,6 +389,10 @@ int main()
     triggerTests();
     oneShotTests();
     delayTests();
+    crossoverTests();
+    phaseTests();
+    followerTests();
+    suggestTests();
 
     if (failures == 0)
         std::printf ("All DSP tests passed.\n");
