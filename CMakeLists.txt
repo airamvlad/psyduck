@@ -25,7 +25,7 @@ if(PSYDUCK_BUILD_PLUGIN)
 
     juce_add_plugin(PsyDuck
         PRODUCT_NAME "PsyDuck"
-        COMPANY_NAME "PsyDuck Audio"
+        COMPANY_NAME "AMV"
         BUNDLE_ID "audio.psyduck.PsyDuck"
         PLUGIN_MANUFACTURER_CODE Psdk
         PLUGIN_CODE Pdk1
